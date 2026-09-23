@@ -20,7 +20,7 @@ EFFORTS = {
     "agy": {"low", "medium", "high"},
 }
 DENIAL = re.compile(
-    r"soft[- ]denied|permission denied|permission[^\n]*(?:denied|not granted|required)|"
+    r"soft[- ]denied|permission denied|operation not permitted|read[- ]only (?:database|file system)|permission[^\n]*(?:denied|not granted|required)|"
     r"approval[^\n]*(?:denied|required|unavailable|cannot)|"
     r"(?:tool|command)[^\n]*(?:denied|not allowed|requires approval)",
     re.IGNORECASE,
@@ -293,7 +293,9 @@ def ask(provider, mode, cwd, prompt, session, model, effort, timeout, config):
         error = "{} returned no session ID; the conversation cannot be resumed".format(provider)
     elif response is None and not error and not notices:
         error = "{} returned no response".format(provider)
-    status = "timeout" if timed_out else "error" if error else "blocked" if notices else "ok"
+    status = "timeout" if timed_out else "blocked" if notices else "error" if error else "ok"
+    if status == "blocked" and not (parsed_session or session):
+        error = "{} was blocked before returning a session ID".format(provider)
     result = {
         "status": status,
         "provider": provider,

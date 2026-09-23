@@ -25,6 +25,9 @@ if os.environ.get('FAKE_EDIT') == '1':
     pathlib.Path('edited.txt').write_text('changed')
 if os.environ.get('FAKE_DENY') == '1':
     print('Tool run_command requires approval and was soft-denied', file=sys.stderr)
+if os.environ.get('FAKE_HOST_DENY') == '1':
+    print('open state_5.sqlite: operation not permitted', file=sys.stderr)
+    raise SystemExit(1)
 if name == 'codex':
     if os.environ.get('FAKE_NO_SESSION') != '1':
         print(json.dumps({'type': 'thread.started', 'thread_id': 'codex-id'}))
@@ -138,6 +141,16 @@ class PeerTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(result["status"], "blocked")
         self.assertIn("RunCommand", result["permission_notices"][0])
+
+    def test_host_filesystem_denial_is_blocked(self):
+        with mock.patch.dict(os.environ, {"FAKE_HOST_DENY": "1"}):
+            code, result = self.call("ask", "--to", "codex", "--mode", "consult",
+                                     "--cwd", str(self.cwd), "--prompt", "Review")
+        self.assertEqual(code, 2)
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["exit_code"], 1)
+        self.assertEqual(result["error"], "codex was blocked before returning a session ID")
+        self.assertTrue(result["permission_notices"])
 
     def test_structured_denials_are_blocked_for_every_provider(self):
         for provider in peer.PROVIDERS:
