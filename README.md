@@ -1,6 +1,6 @@
 # Peer
 
-Peer lets Codex, Claude Code, and Antigravity CLI consult or delegate work to one another through their local CLIs. It uses each CLI's own saved session history. Peer stores no conversation database or transcript.
+Peer lets Codex, Claude Code, and Antigravity CLI consult or delegate work to one another through their local CLIs. It uses each CLI's own saved session history; Peer keeps no session database. It does save each run's JSON result to a private file (see [Saved results](#saved-results)).
 
 ## Quick start
 
@@ -11,7 +11,7 @@ printf '%s' 'Review this design for failure modes.' | ./peer ask --to claude --m
 printf '%s' 'Implement the parser and run its tests.' | ./peer ask --to agy --mode work --cwd "$PWD"
 ```
 
-Each call prints one JSON object with `status`, `response`, and `session_id`. To continue a specific conversation, pass both the same provider and the returned ID:
+Each call prints one JSON object with `status`, `response`, `session_id`, and `output_file`. To continue a specific conversation, pass both the same provider and the returned ID:
 
 ```sh
 printf '%s' 'Check the edge cases too.' | ./peer ask --to claude --mode work --cwd "$PWD" --session SESSION_ID
@@ -33,7 +33,7 @@ Host permissions need their own setup: a Codex host may need to approve the exac
 
 For Antigravity headless use, the optional rules in `~/.gemini/antigravity-cli/settings.json` are `command(python3 ABSOLUTE_INSTALLED_PEER_SCRIPT)` and `unsandboxed(python3 ABSOLUTE_INSTALLED_PEER_SCRIPT)` in `permissions.allow`. Replace the placeholder with the installed skill's `scripts/peer.py` path. These rules let Antigravity run Peer outside its terminal sandbox without a prompt, including Peer `work` calls that may edit files in other workspaces. Add them only if that host access is intended. The skill invokes the script directly so a prefix rule can match; commands with shell substitution may require exact matching.
 
-Claude and Antigravity distinguish editing files from running shell commands. Antigravity headless calls can report a denied tool on stderr while exiting successfully; Peer returns `status: "blocked"` when it detects that notice. Configure scoped command permissions in Antigravity's own settings for commands delegated work needs. Peer returns Git status before and after `work` calls so the caller can inspect the actual diff. A model's claim that it edited a file is not proof of a change.
+Claude and Antigravity distinguish editing files from running shell commands. Antigravity headless calls can report a denied tool on stderr while exiting successfully; Peer returns `status: "blocked"` when it detects that notice. Only structured denials, failed commands, and stderr set `blocked`. Denial-like text in successful command output or in the reply, such as a grep hit on the phrase "permission denied", goes to `permission_warnings` and leaves `status` alone. Configure scoped command permissions in Antigravity's own settings for commands delegated work needs. Peer returns Git status before and after `work` calls, plus `worktree_changed`, which compares a fingerprint of all uncommitted content, so edits to an already-modified file still count. A model's claim that it edited a file is not proof of a change.
 
 Antigravity's file tool can otherwise choose its own scratch directory for a relative path. Peer includes the absolute workspace path in every work prompt and asks for absolute file paths under it. Check the returned Git status and diff; a successful model response alone does not establish that it wrote to the requested checkout.
 
@@ -41,12 +41,22 @@ For strict consultation isolation, verify your target's mode in a throwaway dire
 
 ## Model and effort defaults
 
-Copy `config.example.json` to `~/.config/peer/config.json`, or pass `--config PATH`. This file stores preferences, not sessions. The precedence is command flag, Peer config, then the provider's own default. Model names pass through unchanged. Effort values are checked against each CLI's supported vocabulary, then the CLI validates the model/effort pairing.
+Copy `config.example.json` to `~/.config/peer/config.json`, or pass `--config PATH`. This file stores preferences, not sessions. Unknown keys are rejected so that typos do not pass silently. The precedence is command flag, Peer config, then the provider's own default. Model names pass through unchanged. Effort values are checked against each CLI's supported vocabulary, then the CLI validates the model/effort pairing. When a CLI adds levels before Peer knows them, set `providers.PROVIDER.efforts` to the full list.
 
 ```sh
 printf '%s' 'Find the bug and fix it.' | ./peer ask --to codex --mode work \
-  --model gpt-6-sol --effort high --cwd "$PWD"
+  --model gpt-5.5 --effort high --cwd "$PWD"
 ```
+
+## Timeouts and interruption
+
+`--timeout` (default 600 seconds) applies to each provider call. When it expires, or when Peer receives SIGINT, SIGTERM, or SIGHUP, Peer sends SIGTERM to the child's process group, waits 5 seconds so the agent can save its session, then sends SIGKILL to anything left. The result is `timeout` or `interrupted`, with any session ID already returned. SIGKILL to Peer itself cannot be caught and can leave the child running. Give the host's own command timeout more time than Peer's, or run Peer in the background.
+
+## Saved results
+
+`ask` and `debate` save the printed JSON, plus the prompt, to `$XDG_STATE_HOME/peer/runs/` (default `~/.local/state/peer/runs/`) as `TIMESTAMP-COMMAND-PROVIDERS-PID.json`. Peer prints the path on stderr when the run starts and returns it as `output_file`. Use this file when a host truncates long output or runs Peer in the background. A debate's file is rewritten after each finished turn. Files are mode `0600` in a `0700` directory. Set `output_dir` in config to change the location, pass `--output FILE` for one run, or `--no-save` to skip writing. Peer never deletes old files; prune the directory yourself.
+
+## Resuming
 
 On every call, Peer passes the selected mode, model, and effort again, including when resuming a session. It always resumes by explicit ID. Do not use Codex `--ephemeral` or Claude `--no-session-persistence` with Peer.
 
@@ -59,7 +69,7 @@ printf '%s' 'Should this cache be write-through or write-back?' | \
 
 `debate` alternates read-only consultations, returns the full exchange plus both session IDs, and stops after the requested rounds. Pass `--session-a` and `--session-b` to continue a previous pair. Peer caps recursive calls from an agent it launched, so the outer caller coordinates the discussion.
 
-One round means A speaks once, then B replies to A. Two rounds make four provider calls: A → B → A → B. Peer passes up to 12,000 characters of each answer to the next provider. Each provider call has its own timeout; the outer caller synthesizes the returned transcript.
+One round means A speaks once, then B replies to A. Two rounds make four provider calls: A → B → A → B. Peer passes up to 12,000 characters of each answer to the next provider and marks the cut when it truncates. Each provider call has its own timeout; the outer caller synthesizes the returned transcript.
 
 ## Install the shared skill
 

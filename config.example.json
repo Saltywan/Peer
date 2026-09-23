@@ -1,5 +1,6 @@
 {
   "timeout_seconds": 600,
+  "output_dir": null,
   "providers": {
     "codex": {
       "model": null,
