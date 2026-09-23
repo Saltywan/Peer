@@ -1,0 +1,18 @@
+{
+  "timeout_seconds": 600,
+  "providers": {
+    "codex": {
+      "model": null,
+      "effort": null
+    },
+    "claude": {
+      "model": null,
+      "effort": null,
+      "work_allowed_tools": []
+    },
+    "agy": {
+      "model": null,
+      "effort": null
+    }
+  }
+}
