@@ -34,6 +34,7 @@ These model names are a **2026-09-24 snapshot**, not a guarantee that this accou
 ```sh
 python3 PEER_SCRIPT ask --to claude --mode consult --cwd "$PWD" --prompt 'Review this design.'
 python3 PEER_SCRIPT ask --to codex --mode work --cwd "$PWD" --model gpt-5.5 --effort high --prompt 'Fix the parser.'
+python3 PEER_SCRIPT ask --to agy --mode work --cwd "$PWD" --prompt "Fix the bug in $PWD/src/parser.py and run its tests."
 python3 PEER_SCRIPT ask --to codex --cwd "$PWD" --session SESSION_ID --prompt 'Check one more edge case.'
 python3 PEER_SCRIPT debate --a codex --b agy --rounds 2 --cwd "$PWD" --prompt 'Which design is simpler?'
 ```
@@ -44,7 +45,7 @@ In Antigravity, invoke `python3 <absolute-path-to-this-skill-folder>/scripts/pee
 
 - Use `--mode consult` for advice, reviews, and debates. Use `--mode work` when the user asks the other provider to implement or edit. The target may edit files in its workspace in work mode.
 - Pass `--model` and `--effort` when the user chooses them; otherwise Peer uses its config or the provider's defaults.
-- To continue, keep the returned provider, `session_id`, and `cwd`, then pass `--session ID`. Never substitute a "continue latest" command.
+- To continue, keep the returned provider, `session_id`, and `cwd`, then pass `--session ID`. If the ID or cwd is missing from the current context, ask for it or identify one unique matching native session before resuming. Never guess or substitute a "continue latest" command.
 - For a two-provider discussion, use `debate --a PROVIDER --b PROVIDER --rounds N`. The outer caller synthesizes the exchange.
 - If this host blocks the Peer command, use its normal scoped permission or approval flow. If Peer returns `blocked`, `error`, or `timeout`, inspect `permission_notices`, `error`, and `diagnostics`; report what happened and preserve any returned session ID. Do not switch to a permission-bypass flag. A called agent cannot exceed this host's sandbox.
 - After `work`, inspect the actual diff and status. Do not run concurrent editors in one checkout; use separate worktrees for parallel work.
