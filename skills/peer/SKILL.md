@@ -5,7 +5,9 @@ description: Consult or delegate bounded work to Codex, Claude Code, or Antigrav
 
 # Peer
 
-Use the bundled `scripts/peer.py` with an absolute path derived from this skill folder. Pass the project directory with `--cwd` and the task prompt through stdin. The target CLI must be installed and available to this host's shell.
+Use the bundled `scripts/peer.py` with an absolute path derived from this skill folder. Pass the project directory with `--cwd`. Pass the task prompt through stdin, or use `--prompt` for short prompts. The target CLI must be installed and available to this host's shell.
+
+In Antigravity, invoke `python3 <absolute-path-to-this-skill-folder>/scripts/peer.py ask ... --prompt '...'` directly, without a shell pipeline. This lets Antigravity match a scoped `command(...)` permission rule for the Peer launcher. Quote the prompt as one shell argument.
 
 - Use `--mode consult` for advice, reviews, and debates. Use `--mode work` when the user asks the other provider to implement or edit. The target may edit files in its workspace in work mode.
 - Set `--to codex`, `--to claude`, or `--to agy`. Pass `--model` and `--effort` when the user chooses them; otherwise Peer uses its config or the provider's defaults.

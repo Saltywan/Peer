@@ -40,7 +40,10 @@ else:
     print(json.dumps({'event': 'init', 'conversation_id': 'agy-id'}))
     if os.environ.get('FAKE_STRUCTURED_DENY') == '1':
         print(json.dumps({'event': 'step_update', 'step_update': {'step_type': 'tool_call', 'error': 'permission denied'}}))
-    print(json.dumps({'event': 'result', 'result': {'conversation_id': 'agy-id', 'status': 'SUCCESS', 'response': 'agy reply'}}))
+    result = {'conversation_id': 'agy-id', 'status': 'SUCCESS', 'response': 'agy reply'}
+    if os.environ.get('FAKE_RESULT_DENY') == '1':
+        result['denied_actions'] = [{'action': 'command', 'display_name': 'RunCommand'}]
+    print(json.dumps({'event': 'result', 'result': result}))
 """
 
 
@@ -127,6 +130,14 @@ class PeerTests(unittest.TestCase):
         self.assertEqual(result["exit_code"], 0)
         self.assertEqual(result["session_id"], "agy-id")
         self.assertTrue(result["permission_notices"])
+
+    def test_agy_result_denied_actions_are_blocked(self):
+        with mock.patch.dict(os.environ, {"FAKE_RESULT_DENY": "1"}):
+            code, result = self.call("ask", "--to", "agy", "--mode", "consult",
+                                     "--cwd", str(self.cwd), "--prompt", "Review")
+        self.assertEqual(code, 2)
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("RunCommand", result["permission_notices"][0])
 
     def test_structured_denials_are_blocked_for_every_provider(self):
         for provider in peer.PROVIDERS:

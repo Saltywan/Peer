@@ -215,6 +215,10 @@ def structured_permission_notices(provider, stdout, response, mode):
                     continue
                 candidates = (item.get("aggregated_output"), item.get("error"), event.get("message"))
             else:
+                if event.get("event") == "result":
+                    result = event.get("result") or {}
+                    for denial in result.get("denied_actions", []):
+                        notices.append("Antigravity denied action: {}".format(denial))
                 update = event.get("step_update") or {}
                 if update.get("step_type") in ("user_input", "agent_response"):
                     continue
