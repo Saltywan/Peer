@@ -79,7 +79,7 @@ The canonical skill is `skills/peer/`. From the repository root, install it for 
 mkdir -p ~/.agents/skills ~/.claude/skills ~/.gemini/antigravity-cli/skills
 ln -s "$PWD/skills/peer" ~/.agents/skills/peer
 ln -s "$PWD/skills/peer" ~/.claude/skills/peer
-cp -R skills/peer ~/.gemini/antigravity-cli/skills/peer
+ln -s "$PWD/skills/peer" ~/.gemini/antigravity-cli/skills/peer
 ```
 
 These are the personal skill locations:
@@ -88,7 +88,7 @@ These are the personal skill locations:
 - Claude Code: `~/.claude/skills/peer`
 - Antigravity CLI: `~/.gemini/antigravity-cli/skills/peer`
 
-Codex and Claude document support for symlinked skill folders. Antigravity gets a copy because symlink discovery is not documented; copy it again after updating Peer. The skill points at its bundled `scripts/peer.py`, so the CLI does not need to be on `PATH`. Check each host's skill list after installation.
+Codex and Claude document support for symlinked skill folders. Antigravity does not document it, but it loaded a symlinked `peer` skill in a 2026-09-24 test: `agy -p '/peer ...'` answered from this SKILL.md. With symlinks, all three hosts use whichever branch this checkout has checked out. The skill points at its bundled `scripts/peer.py`, so the CLI does not need to be on `PATH`. Check that each host loads the skill after installation; for Antigravity, `agy -p '/peer Reply with the first section title.'` should answer from SKILL.md.
 
 ## Verification
 
