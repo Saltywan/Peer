@@ -59,6 +59,8 @@ printf '%s' 'Should this cache be write-through or write-back?' | \
 
 `debate` alternates read-only consultations, returns the full exchange plus both session IDs, and stops after the requested rounds. Pass `--session-a` and `--session-b` to continue a previous pair. Peer caps recursive calls from an agent it launched, so the outer caller coordinates the discussion.
 
+One round means A speaks once, then B replies to A. Two rounds make four provider calls: A → B → A → B. Peer passes up to 12,000 characters of each answer to the next provider. Each provider call has its own timeout; the outer caller synthesizes the returned transcript.
+
 ## Install the shared skill
 
 The canonical skill is `skills/peer/`. From the repository root, install it for local use across projects:

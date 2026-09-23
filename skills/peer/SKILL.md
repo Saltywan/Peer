@@ -15,15 +15,45 @@ Replace `PEER_SCRIPT` below with the absolute path to this skill's `scripts/peer
 
 ```text
 python3 PEER_SCRIPT ask --to {codex|claude|agy} [--mode {consult|work}] [--cwd DIR] [--session ID] [--model NAME] [--effort LEVEL] [--timeout SECONDS] [--config FILE] [--prompt TEXT]
-python3 PEER_SCRIPT debate --a {codex|claude|agy} --b {codex|claude|agy} [--rounds 1..10] [--session-a ID] [--session-b ID] [--cwd DIR] [--timeout SECONDS] [--config FILE] [--prompt TEXT]
+python3 PEER_SCRIPT debate --a {codex|claude|agy} --b {codex|claude|agy} [--rounds N] [--session-a ID] [--session-b ID] [--cwd DIR] [--timeout SECONDS] [--config FILE] [--prompt TEXT]
 python3 PEER_SCRIPT doctor [--config FILE]
 ```
 
-`ask` sends one turn; `consult` is the default. `debate` alternates two distinct providers in consult mode for two rounds by default. `doctor` reports CLI paths and configured defaults. For `ask` and `debate`, supply the prompt with `--prompt` or on stdin. `--config` selects a JSON config file; otherwise Peer uses `~/.config/peer/config.json` if present. `--model` and `--effort` override that config for `ask`; debate uses its configured provider defaults. Valid effort levels: Codex `low|medium|high|xhigh|max|ultra`, Claude `low|medium|high|xhigh|max`, Antigravity `low|medium|high`. Model names pass through to the provider CLI.
+`ask` makes one provider call. All its arguments are:
+
+| Argument | Meaning and default |
+| --- | --- |
+| `--to` | **Required.** Target CLI: `codex`, `claude`, or `agy`. |
+| `--mode` | `consult` (default, read/review) or `work` (may edit the workspace). |
+| `--cwd` | Project directory. Relative paths are resolved to absolute paths; default is the shell's current directory. Use the same directory when resuming. |
+| `--session` | Native session ID returned by an earlier `ask` for this provider. Omit to start a new session. |
+| `--model` | Provider model name or alias for this call. Overrides Peer config, then the provider default. |
+| `--effort` | Reasoning effort for this call. Overrides Peer config, then the provider default; valid values are below. |
+| `--timeout` | Positive seconds allowed for this provider call. Defaults to `timeout_seconds` in config, or 600 seconds. |
+| `--config` | JSON config path. If omitted, Peer uses `$PEER_CONFIG` when set; otherwise `$XDG_CONFIG_HOME/peer/config.json` when XDG is set, or `~/.config/peer/config.json`. |
+| `--prompt` | Task text. If omitted, Peer reads stdin. An empty prompt is rejected. |
+
+`debate` makes sequential `consult` calls to two **different** providers. One **round** means A answers, then B answers after seeing A's answer. In round 2, A sees B's previous answer, then B sees A's new answer. Thus `--rounds 2` makes A → B → A → B (four provider calls, unless one fails). Each handoff includes up to 12,000 characters of the previous answer. The outer caller reads the transcript and synthesizes it; Peer does not add a third summarizing call.
+
+| Argument | Meaning and default |
+| --- | --- |
+| `--a`, `--b` | **Required.** First and second provider, each `codex`, `claude`, or `agy`; they must differ. |
+| `--rounds` | Complete A-then-B rounds, integer 1–10; default 2. Plans `2 × N` calls; stops early if one fails. |
+| `--session-a`, `--session-b` | Native session IDs for A and B if continuing an earlier debate. Omit either to start that provider's new session. |
+| `--cwd` | Project directory for both providers; defaults to the shell's current directory. Reuse the original directory when resuming. |
+| `--timeout` | Positive seconds **per provider call**, not for the entire debate. Defaults to config `timeout_seconds` or 600. |
+| `--config` | Same config resolution as `ask`. Sets each provider's model and effort; `debate` has no per-call model or effort flags. |
+| `--prompt` | Question or topic. If omitted, Peer reads stdin. |
+
+`doctor` checks which CLIs are on `PATH` and reports configured model, effort, timeout, and Claude work-tool settings. Its only argument is `--config FILE`, with the same default resolution. Every command accepts `-h` or `--help` to show CLI help.
 
 ## Models
 
 Run `python3 PEER_SCRIPT doctor` to see Peer’s configured model and effort for each provider. `null` means Peer passes no override, so the provider chooses its own default. To set a lasting Peer preference, edit `~/.config/peer/config.json` under `providers.PROVIDER.model` and `providers.PROVIDER.effort` (see the repository’s `config.example.json`). For one `ask`, use `--model NAME --effort LEVEL`. Debate uses the configured defaults for both providers.
+
+For example, a config file can contain `{"providers":{"codex":{"model":"gpt-5.5","effort":"high"},"agy":{"model":"gemini-3.8-flash-high","effort":"medium"}}}`. For Claude work-mode shell access, its optional `work_allowed_tools` config list passes tool rules to Claude; leave it empty unless the task needs specific commands.
+
+Valid `--effort` values are Codex `low|medium|high|xhigh|max|ultra`, Claude `low|medium|high|xhigh|max`, and Antigravity `low|medium|high`. The selected model must support the selected effort; the provider CLI makes the final check.
 
 These model names are a **2026-09-24 snapshot**, not a guarantee that this account can use them. Check live choices before promising a model, and report a provider rejection rather than silently replacing the requested model:
 
