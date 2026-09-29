@@ -4,7 +4,8 @@
   "providers": {
     "codex": {
       "model": null,
-      "effort": null
+      "effort": null,
+      "aliases": {}
     },
     "claude": {
       "model": null,
