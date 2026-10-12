@@ -5,6 +5,7 @@ import argparse
 import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -46,6 +47,11 @@ COMPACT_KEYS = ("status", "provider", "mode", "cwd", "session_id", "session_name
 
 class Terminated(Exception):
     """Raised in place of the default exit when Peer receives SIGTERM or SIGHUP."""
+
+
+class JsonArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise ValueError(message)
 
 
 def raise_terminated(signum, frame):
@@ -111,8 +117,13 @@ def load_config(explicit):
                 raise ValueError("unknown configuration key: providers.{}.{}".format(provider, key))
         aliases = provider_config.get("aliases", {})
         if not isinstance(aliases, dict) or any(
-                not isinstance(v, str) or not v.strip() for v in aliases.values()):
+                not k.strip() or not isinstance(v, str) or not v.strip() for k, v in aliases.items()):
             raise ValueError("providers.{}.aliases must map names to model strings".format(provider))
+        if len({k.lower() for k in aliases}) != len(aliases):
+            raise ValueError("providers.{}.aliases must have distinct case-insensitive names".format(provider))
+    validate_timeout(config.get("timeout_seconds", DEFAULT_TIMEOUT))
+    for provider in PROVIDERS:
+        preferences(config, provider)
     return config, path
 
 
@@ -141,15 +152,24 @@ def preferences(config, provider, model=None, effort=None, timeout=None):
     aliases = {k.lower(): v for k, v in provider_config.get("aliases", {}).items()}
     if chosen_model is not None and chosen_model.lower() in aliases:
         alias, chosen_model = chosen_model, aliases[chosen_model.lower()]
-    if chosen_effort is not None and chosen_effort not in levels:
+    if chosen_effort is not None and (not isinstance(chosen_effort, str) or chosen_effort not in levels):
         raise ValueError("{} effort must be one of: {}".format(provider, ", ".join(sorted(levels))))
-    if isinstance(chosen_timeout, bool) or not isinstance(chosen_timeout, (int, float)) or chosen_timeout <= 0:
-        raise ValueError("timeout_seconds must be positive")
+    validate_timeout(chosen_timeout)
     allowed_tools = provider_config.get("work_allowed_tools", [])
     if not isinstance(allowed_tools, list) or any(not isinstance(x, str) or not x for x in allowed_tools):
         raise ValueError("providers.{}.work_allowed_tools must be a list of strings".format(provider))
     return {"model": chosen_model, "model_alias": alias, "effort": chosen_effort,
             "timeout": chosen_timeout, "allowed_tools": allowed_tools}
+
+
+def validate_timeout(value):
+    try:
+        valid = (not isinstance(value, bool) and isinstance(value, (int, float)) and
+                 value > 0 and math.isfinite(value))
+    except OverflowError:
+        valid = False
+    if not valid:
+        raise ValueError("timeout_seconds must be a finite positive number")
 
 
 def state_dir():
@@ -169,7 +189,8 @@ def output_path(args, config):
     if args.output:
         return Path(args.output).expanduser().resolve()
     label = args.to if args.command == "ask" else "{}-{}".format(args.a, args.b)
-    name = "{}-{}-{}-{}.json".format(time.strftime("%Y%m%d-%H%M%S"), args.command, label, os.getpid())
+    name = "{}-{}-{}-{}-{}.json".format(
+        time.strftime("%Y%m%d-%H%M%S"), args.command, label, os.getpid(), time.time_ns())
     return output_dir(config) / name
 
 
@@ -192,10 +213,10 @@ class RunFile:
         self.update()
 
     def update(self, **fields):
-        if self.path is None:
-            return
         self.record.update(fields)
         self.record["updated_at"] = now()
+        if self.path is None:
+            return
         try:
             save_result(self.path, self.record)
         except OSError:
@@ -530,7 +551,7 @@ def content_token(path):
         with open(path, "rb") as handle:
             for chunk in iter(lambda: handle.read(1 << 20), b""):
                 digest.update(chunk)
-        return digest.hexdigest()
+        return "{:o}:{}".format(os.stat(path).st_mode & 0o777, digest.hexdigest())
     except FileNotFoundError:
         return "missing"
     except OSError:
@@ -538,10 +559,16 @@ def content_token(path):
 
 
 def git_snapshot(cwd):
-    """Content hashes of every path Git reports as dirty or untracked, or None outside Git."""
-    raw = git_output(cwd, "status", "--porcelain", "-z", "--untracked-files=all")
-    if raw is None:
+    """Dirty content and index state, with paths relative to the repository root."""
+    root_raw = git_output(cwd, "rev-parse", "--show-toplevel")
+    if root_raw is None:
         return None
+    root = os.fsdecode(root_raw.rstrip(b"\n"))
+    raw = git_output(root, "status", "--porcelain", "-z", "--untracked-files=all")
+    staged = git_output(root, "ls-files", "--stage", "-z")
+    if raw is None or staged is None:
+        return {"method": "git", "files": None, "root": root,
+                "note": "Git status or index could not be read; changes not compared"}
     codes = {}
     entries = raw.split(b"\0")
     index = 0
@@ -554,8 +581,34 @@ def git_snapshot(cwd):
         codes[os.fsdecode(entry[3:])] = code
         if code[0] in "RC":
             index += 1  # -z puts a rename's original path in the next entry
-    files = {name: content_token(os.path.join(cwd, name)) for name in codes}
-    return {"method": "git", "files": files, "codes": codes}
+    index_entries = {}
+    for entry in staged.split(b"\0"):
+        if b"\t" in entry:
+            metadata, name = entry.split(b"\t", 1)
+            name = os.fsdecode(name)
+            if name in codes:
+                index_entries.setdefault(name, []).append(os.fsdecode(metadata))
+    files = {name: content_token(os.path.join(root, name)) for name in codes}
+    head = git_output(root, "rev-parse", "--verify", "HEAD")
+    return {"method": "git", "root": root, "head": head.strip().decode("ascii") if head else None,
+            "files": files, "codes": codes, "index": index_entries}
+
+
+def committed_paths(before, after):
+    """Paths changed between the two HEAD trees, including the first commit."""
+    old, new = before["head"], after["head"]
+    root = after["root"]
+    if old and new:
+        raw = git_output(root, "diff", "--no-renames", "--name-status", "-z", old, new, "--")
+        if raw is None:
+            return None
+        entries = raw.rstrip(b"\0").split(b"\0") if raw else []
+        return {os.fsdecode(entries[i + 1]): os.fsdecode(entries[i])
+                for i in range(0, len(entries), 2)}
+    raw = git_output(root, "ls-tree", "-r", "--name-only", "-z", new or old)
+    if raw is None:
+        return None
+    return {os.fsdecode(name): "A" if new else "D" for name in raw.split(b"\0") if name}
 
 
 def file_snapshot(cwd):
@@ -588,17 +641,35 @@ def worktree_report(before, after):
     if before["method"] != after["method"]:
         return {"worktree_changed": None,
                 "worktree_note": "the workspace switched between Git and non-Git during the call"}
+    is_git = before["method"] == "git"
+    if is_git and before["root"] != after["root"]:
+        return {"worktree_changed": None, "worktree_note": "the Git repository root changed during the call"}
     old, new = before["files"], after["files"]
-    changed = []
+    changed = {}
     for name in sorted(set(old) | set(new)):
-        if old.get(name) != new.get(name):
-            if before["method"] == "git":
+        if (old.get(name) != new.get(name) or
+                (is_git and (before["codes"].get(name) != after["codes"].get(name) or
+                             before["index"].get(name) != after["index"].get(name)))):
+            if is_git:
                 code = after["codes"].get(name, "clean")
             else:
                 code = "A" if name not in old else "D" if name not in new else "M"
-            changed.append("{} {}".format(code, name))
-    report = {"worktree_changed": bool(changed), "changed_paths": changed}
-    if before["method"] == "files":
+            changed[name] = code
+    head_changed = is_git and before["head"] != after["head"]
+    note = None
+    if head_changed:
+        committed = committed_paths(before, after)
+        if committed is None:
+            note = "HEAD changed, but committed paths could not be compared"
+        else:
+            for name, code in committed.items():
+                changed[name] = after["codes"].get(name, code)
+            note = "HEAD changed; compared committed paths as well as dirty content and index state"
+    report = {"worktree_changed": bool(changed) or head_changed,
+              "changed_paths": ["{} {}".format(changed[name], name) for name in sorted(changed)]}
+    if note:
+        report["worktree_note"] = note
+    if not is_git:
         report["worktree_note"] = "not a Git repository; compared file sizes and modification times"
     return report
 
@@ -771,6 +842,8 @@ def compact_turn(result):
 
 
 def compact(result):
+    if result.get("status") != "ok":
+        return result
     if "transcript" not in result:
         return compact_turn(result)
     short = {key: value for key, value in result.items() if key != "transcript"}
@@ -802,28 +875,38 @@ def debate(args, cwd, prompt, config, run, attachments):
         check_name(args.new_session)
     side = {args.a: (args.model_a, args.effort_a), args.b: (args.model_b, args.effort_b)}
     transcript = []
+    summary = {"sessions": sessions, "transcript": transcript}
+    if name:
+        summary["session_name"] = name
+    run.update(**summary)
+    # Fail before spending a turn when the other side is unavailable or misconfigured.
+    for provider in (args.a, args.b):
+        preferences(config, provider, side[provider][0], side[provider][1], args.timeout)
+        if not shutil.which(provider):
+            raise ValueError("{} CLI is not installed or not on PATH".format(provider))
     relay = prompt
     for _ in range(args.rounds):
         for provider in (args.a, args.b):
-            message = prompt if not transcript else (
-                "Original question:\n{}\n\n{} replied:\n{}\n\nRespond to their reasoning."
-                .format(prompt, transcript[-1]["provider"], relay)
-            )
             first_turn = all(t["provider"] != provider for t in transcript)
+            if not transcript:
+                message = prompt
+            else:
+                exchange = "{} replied:\n{}\n\nRespond to their reasoning.".format(
+                    transcript[-1]["provider"], relay)
+                # A fresh side needs the brief; later turns already have it in native history.
+                message = ("Debate brief:\n{}\n\n{}".format(prompt, exchange)
+                           if first_turn else exchange)
             result = ask(provider, "consult", cwd, message, config, session=sessions[provider],
                          model=side[provider][0], effort=side[provider][1], timeout=args.timeout,
                          attachments=attachments if first_turn else (),
                          progress=lambda info, p=provider: run.update(current=dict(info, provider=p)))
             sessions[provider] = result["session_id"]
+            transcript.append(result)
+            run.update(current=None, **summary)
             if name and result["session_id"]:
                 bind_name(provider, cwd, name, result["session_id"])
-            transcript.append(result)
-            summary = {"sessions": sessions, "transcript": transcript}
-            if name:
-                summary["session_name"] = name
             if result["status"] != "ok":
                 return dict(summary, status=result["status"], error=result.get("error"))
-            run.update(current=None, **summary)
             relay = relay_text(result["response"])
     return dict(summary, status="ok")
 
@@ -835,15 +918,19 @@ def recorded_sessions(config, cwd, show_all):
     for provider, by_cwd in names.items():
         for directory, entries in by_cwd.items():
             for name, entry in entries.items():
-                bound.setdefault((provider, entry.get("session_id")), []).append(name)
+                bound.setdefault((provider, entry.get("session_id"), directory), []).append(name)
     found = {}
     runs = output_dir(config)
-    for path in sorted(runs.glob("*.json")) if runs.is_dir() else []:
+    records = []
+    for path in runs.glob("*.json") if runs.is_dir() else []:
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
-            used = path.stat().st_mtime
+            used = path.stat().st_mtime_ns
         except (OSError, ValueError):
             continue
+        if isinstance(record, dict):
+            records.append((used, record))
+    for used, record in sorted(records, key=lambda r: r[0]):
         turns = record.get("transcript") or [record]
         for turn in turns:
             if not isinstance(turn, dict) or not turn.get("session_id"):
@@ -851,14 +938,16 @@ def recorded_sessions(config, cwd, show_all):
             directory = turn.get("cwd") or record.get("cwd")
             if not show_all and directory != cwd:
                 continue
-            key = (turn.get("provider"), turn["session_id"])
+            key = (turn.get("provider"), turn["session_id"], directory)
             entry = found.setdefault(key, {
                 "provider": key[0], "session_id": key[1], "cwd": directory,
                 "names": bound.get(key, []), "runs": 0,
                 "first_prompt": (record.get("prompt") or "").strip().split("\n")[0][:100]})
             entry["runs"] += 1
-            entry["last_used"] = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(used))
-    return sorted(found.values(), key=lambda e: e["last_used"], reverse=True)[:20]
+            entry["last_used"] = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(used / 1e9))
+            entry["last_used_ns"] = used
+    newest = sorted(found.values(), key=lambda e: e["last_used_ns"], reverse=True)[:20]
+    return [{key: value for key, value in entry.items() if key != "last_used_ns"} for entry in newest]
 
 
 def model_listing(config):
@@ -915,7 +1004,7 @@ def add_run_arguments(parser):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Consult or delegate work to a local agent CLI")
+    parser = JsonArgumentParser(description="Consult or delegate work to a local agent CLI")
     sub = parser.add_subparsers(dest="command", required=True)
     ask_parser = sub.add_parser("ask", help="send one turn, optionally resuming a session")
     ask_parser.add_argument("--to", required=True, choices=PROVIDERS)
@@ -950,9 +1039,9 @@ def main(argv=None):
                        ("models", "show configured models and aliases, and list Antigravity models live")):
         sub.add_parser(name, help=text).add_argument("--config")
 
-    args = parser.parse_args(argv)
     run = None
     try:
+        args = parser.parse_args(argv)
         config, config_file = load_config(args.config)
         if args.command == "doctor":
             providers = {}
@@ -989,6 +1078,7 @@ def main(argv=None):
         result = ask(args.to, args.mode, cwd, prompt, config, session=session, model=args.model,
                      effort=args.effort, timeout=args.timeout, attachments=attachments,
                      progress=lambda info: run.update(**info))
+        run.update(**result)
         name = args.session_name or args.new_session
         if name and result["session_id"]:
             result["session_name"] = name
@@ -996,9 +1086,15 @@ def main(argv=None):
             if previous and args.new_session:
                 result["replaced_session_id"] = previous
         return emit(result, run, args.full)
-    except (ValueError, KeyboardInterrupt, Terminated) as exc:
-        message = str(exc) if isinstance(exc, ValueError) else "interrupted"
-        return emit({"status": "error", "error": message or "interrupted"}, run)
+    except (ValueError, OSError, KeyboardInterrupt, Terminated) as exc:
+        interrupted = isinstance(exc, (KeyboardInterrupt, Terminated))
+        result = {key: value for key, value in (run.record.items() if run else [])
+                  if key not in ("pid", "status", "prompt", "started_at", "updated_at")}
+        current = result.get("current") or {}
+        if current.get("session_id") and "sessions" in result:
+            result["sessions"][current["provider"]] = current["session_id"]
+        result.update(status="interrupted" if interrupted else "error", error=str(exc) or "interrupted")
+        return emit(result, run)
 
 
 if __name__ == "__main__":

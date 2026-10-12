@@ -37,7 +37,7 @@ For Antigravity headless use, the optional rules in `~/.gemini/antigravity-cli/s
 
 Claude and Antigravity distinguish editing files from running shell commands. Antigravity headless calls can report a denied tool on stderr while exiting successfully; Peer returns `status: "blocked"` when it detects that notice. Only structured denials, failed commands, and stderr set `blocked`. Denial-like text in successful command output or in the reply, such as a grep hit on the phrase "permission denied", goes to `permission_warnings` and leaves `status` alone. A Codex command killed by a signal (exit code 128 or higher, such as Chrome exiting with 134 inside the sandbox) also becomes a warning, because it usually means the target could not run a local app. Configure scoped command permissions in Antigravity's own settings for commands delegated work needs.
 
-After a `work` call, `changed_paths` lists what changed during the call and `worktree_changed` summarizes it. In a Git repository, Peer hashes the content of every dirty or untracked path before and after, so a further edit to an already-modified file still counts. Outside Git, it compares the size and modification time of every file (skipping `.git`, `node_modules`, virtualenvs, and caches), up to 20,000 files. Past that limit, `worktree_changed` is `null` and `worktree_note` says why; `null` means unknown, not unchanged. A model's claim that it edited a file is not proof of a change.
+After a `work` call, `changed_paths` lists what changed during the call and `worktree_changed` summarizes it. In Git, Peer compares dirty/untracked file content and permissions, index state, and `HEAD`. This detects further edits to already-modified files, staging changes, and edits committed by the child, including a first commit. Paths are relative to the repository root even when `--cwd` is a subdirectory. A history change with the same tree reports true with an empty path list and a note. Outside Git, Peer compares the size and modification time of every file (skipping `.git`, `node_modules`, virtualenvs, and caches), up to 20,000 files. Past that limit, `worktree_changed` is `null` and `worktree_note` says why; `null` means unknown, not unchanged. A model's claim that it edited a file is not proof of a change.
 
 Antigravity's file tool can otherwise choose its own scratch directory for a relative path. Peer includes the absolute workspace path in every work prompt and asks for absolute file paths under it. Check the returned `changed_paths` and the diff; a successful model response alone does not establish that it wrote to the requested checkout.
 
@@ -45,11 +45,13 @@ For strict consultation isolation, verify your target's mode in a throwaway dire
 
 ## Model and effort defaults
 
-Copy `config.example.json` to `~/.config/peer/config.json`, or pass `--config PATH`. This file stores preferences, not sessions. Unknown keys are rejected so that typos do not pass silently. The precedence is command flag, Peer config, then the provider's own default. Model names pass through unchanged unless they match an alias in `providers.PROVIDER.aliases`, for example `"aliases": {"sol": "gpt-6-sol"}`. Aliases are case-insensitive, come only from your config, and the result reports both the resolved `model` and the `model_alias`. `./peer models` shows aliases and lists Antigravity's models live; Codex and Claude Code have no CLI command that lists models. Effort values are checked against each CLI's supported vocabulary, then the CLI validates the model/effort pairing. When a CLI adds levels before Peer knows them, set `providers.PROVIDER.efforts` to the full list.
+Copy `config.example.json` to `~/.config/peer/config.json`, or pass `--config PATH`. This file stores preferences, not sessions. Unknown keys are rejected so that typos do not pass silently. The precedence is command flag, Peer config, then the provider's own default. Model names pass through unchanged unless they match an alias in `providers.PROVIDER.aliases`, for example `"aliases": {"sol": "gpt-6.1-sol"}`. Aliases are case-insensitive, come only from your config, and the result reports both the resolved `model` and the `model_alias`. `./peer models` shows aliases and lists Antigravity's models live; Codex and Claude Code have no CLI command that lists models. Effort values are checked against each CLI's supported vocabulary, then the CLI validates the model/effort pairing. When a CLI adds levels before Peer knows them, set `providers.PROVIDER.efforts` to the full list.
+
+Model guidance was checked on October 13, 2026. For Codex, [OpenAI recommends `gpt-6.1-sol`](https://learn.chatgpt.com/docs/models) for complex coding when available to your account. See [the model reference](skills/peer/references/models.md) for current examples, other providers, and how to check live choices. Peer has no built-in model allowlist and does not automatically replace an explicit model or alias.
 
 ```sh
 printf '%s' 'Find the bug and fix it.' | ./peer ask --to codex --mode work \
-  --model gpt-5.5 --effort high --cwd "$PWD"
+  --model gpt-6.1-sol --effort high --cwd "$PWD"
 ```
 
 ## Timeouts and interruption
@@ -60,11 +62,11 @@ printf '%s' 'Find the bug and fix it.' | ./peer ask --to codex --mode work \
 
 ## Saved results
 
-`ask` and `debate` save the full result, plus the prompt, to `$XDG_STATE_HOME/peer/runs/` (default `~/.local/state/peer/runs/`) as `TIMESTAMP-COMMAND-PROVIDERS-PID.json`, and return the path as `output_file`. Files are mode `0600` in a `0700` directory. Set `output_dir` in config to change the location, pass `--output FILE` for one run (useful for background runs, since you know the path in advance), or `--no-save` to skip writing. Peer never deletes old files; prune the directory yourself.
+`ask` and `debate` save the full result, plus the prompt, to `$XDG_STATE_HOME/peer/runs/` (default `~/.local/state/peer/runs/`) as `TIMESTAMP-COMMAND-PROVIDERS-PID-NANOSECONDS.json`, and return the path as `output_file`. The nanosecond suffix distinguishes fast calls from the same process. Files are mode `0600` in a `0700` directory. Set `output_dir` in config to change the location, pass `--output FILE` for one run (useful for background runs, since you know the path in advance), or `--no-save` to skip writing. Peer never deletes old files; prune the directory yourself.
 
 The file exists from the start of the run. Until the call finishes it holds `status: "running"` with `pid`, `started_at`, and `updated_at`, and about every 15 seconds Peer adds `elapsed_seconds`, `output_events`, `last_activity` (the child's latest streamed event, such as a Codex command), and any `session_id` seen so far. A debate keeps these under `current` and adds each finished turn. A `running` file whose `updated_at` stopped changing, or whose `pid` no longer exists, is stale: Peer was killed.
 
-Stdout carries only the JSON result; Peer writes nothing to stderr, so background output parses as JSON. A successful call prints a compact result: the response and the fields needed to resume or check work, with `permission_warnings` as a count and `changed_paths` capped at 30 entries. Diagnostics, notices, exit codes, and full lists stay in the saved file. Failures print the full record. `--full` prints everything, as does `--no-save`, since there is no file to hold the rest.
+Stdout carries only the JSON result; Peer writes nothing to stderr, so background output parses as JSON. Argument and configuration errors also return JSON with exit code 2; `--help` prints ordinary CLI help. All configured providers are validated before launch, including field types and finite positive timeouts. A successful call prints a compact result: the response and the fields needed to resume or check work, with `permission_warnings` as a count and `changed_paths` capped at 30 entries. Diagnostics, notices, exit codes, and full lists stay in the saved file. Failures print the full record. `--full` prints everything, as does `--no-save`, since there is no file to hold the rest.
 
 ## Resuming
 
@@ -81,7 +83,7 @@ printf '%s' 'Should this cache be write-through or write-back?' | \
   ./peer debate --a codex --b claude --rounds 2 --cwd "$PWD"
 ```
 
-`debate` alternates read-only consultations, returns the exchange plus both session IDs, and stops after the requested rounds or at the first failed turn. Stdout shows each successful turn as `{provider, response}`; the saved file keeps every field. Pass `--session-a` and `--session-b` to continue a previous pair, or use `--new-session NAME` and `--session-name NAME` to name both sides at once. `--model-a`, `--model-b`, `--effort-a`, and `--effort-b` set each side's model and effort; otherwise config applies. Attachments go with each side's first turn. Peer caps recursive calls from an agent it launched, so the outer caller coordinates the discussion.
+`debate` alternates read-only consultations, returns the exchange plus both session IDs, and stops after the requested rounds or at the first failed turn. It checks both providers before starting and retains completed turns and known session IDs on later launch or session-name errors, including with `--no-save`. Successful stdout shows each turn as `{provider, response}`; failures and the saved file keep full turn details. Pass `--session-a` and `--session-b` to continue a previous pair, or use `--new-session NAME` and `--session-name NAME` to name both sides at once. `--model-a`, `--model-b`, `--effort-a`, and `--effort-b` set each side's model and effort; otherwise config applies. Attachments go with each side's first turn. Each side receives the current brief on its first turn, then only the latest exchange on later turns. Peer caps recursive calls from an agent it launched, so the outer caller coordinates the discussion.
 
 One round means A speaks once, then B replies to A. Two rounds make four provider calls: A → B → A → B. Peer passes up to 12,000 characters of each answer to the next provider and marks the cut when it truncates. Each provider call has its own timeout; the outer caller synthesizes the returned transcript.
 
@@ -107,5 +109,13 @@ Codex and Claude document support for symlinked skill folders. Antigravity does 
 ## Verification
 
 `python3 -m unittest discover -s tests -v` runs adapter tests with fake CLIs. A live setup check should then use a disposable Git repository from each host to each target: make a fresh call, resume its ID, try a consultation that must not edit, delegate an edit inside the workspace, run one permitted command, and verify a denied command is reported as blocked. The host-to-target matrix is the real test of shell, credential, and sandbox access.
+
+The opt-in `tests/live_smoke.py` automates fresh consultation, named-session memory recovery, unchanged consultation fixtures, and an actual delegated file write. Select your project's interpreter or the host's Python skill interpreter, then run:
+
+```sh
+/absolute/path/to/python tests/live_smoke.py --to claude --timeout 180
+```
+
+It accepts `--to`, `--timeout`, `--config`, `--model`, `--effort`, and `--output-dir` (an existing parent for a new fixture directory). It uses normal permissions, may incur provider usage, and retains fixtures, per-call results, and `summary.json` in the reported artifact directory. Run it in the background. These checks prove the tested host-to-target behavior; unchanged consultation files do not prove OS sandbox enforcement. Command permission/denial probes remain a separate live check.
 
 Provider references: [Codex sandbox and approvals](https://learn.chatgpt.com/docs/agent-approvals-security), [Claude CLI and permissions](https://code.claude.com/docs/en/cli-reference), [Antigravity headless permissions](https://www.agy.dev/docs/cli/headless/).

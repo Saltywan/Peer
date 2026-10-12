@@ -82,7 +82,7 @@ class PeerTests(unittest.TestCase):
         self.bin.mkdir()
         for name in peer.PROVIDERS:
             cli = self.bin / name
-            cli.write_text(FAKE_CLI)
+            cli.write_text(FAKE_CLI.replace("#!/usr/bin/env python3", "#!" + sys.executable, 1))
             cli.chmod(0o755)
         self.log = root / "call.json"
         self.cwd = root / "project"
@@ -457,6 +457,181 @@ class PeerTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertIn("code 134", result["permission_warnings"][0])
         self.assertIn("chrome --headless", result["permission_warnings"][0])
+
+    def git(self, *args):
+        subprocess.run(["git", "-c", "user.name=Peer Tests", "-c", "user.email=tests@example.invalid",
+                        *args], cwd=self.cwd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def test_work_detects_committed_changes_and_initial_commit(self):
+        before = peer.worktree_snapshot(str(self.cwd))
+        target = self.cwd / "tracked.txt"
+        target.write_text("first")
+        self.git("add", ".")
+        self.git("commit", "-qm", "First commit")
+        report = peer.worktree_report(before, peer.worktree_snapshot(str(self.cwd)))
+        self.assertTrue(report["worktree_changed"])
+        self.assertEqual(report["changed_paths"], ["A tracked.txt"])
+        before = peer.worktree_snapshot(str(self.cwd))
+        target.write_text("second")
+        self.git("add", ".")
+        self.git("commit", "-qm", "Child edit")
+        report = peer.worktree_report(before, peer.worktree_snapshot(str(self.cwd)))
+        self.assertTrue(report["worktree_changed"])
+        self.assertEqual(report["changed_paths"], ["M tracked.txt"])
+        before = peer.worktree_snapshot(str(self.cwd))
+        self.git("commit", "--allow-empty", "-qm", "History changed")
+        report = peer.worktree_report(before, peer.worktree_snapshot(str(self.cwd)))
+        self.assertTrue(report["worktree_changed"])
+        self.assertEqual(report["changed_paths"], [])
+        self.assertIn("HEAD changed", report["worktree_note"])
+
+    def test_dirty_file_in_repository_subdirectory(self):
+        folder = self.cwd / "src"
+        folder.mkdir()
+        target = folder / "tracked.txt"
+        target.write_text("first")
+        self.git("add", ".")
+        self.git("commit", "-qm", "Initial")
+        target.write_text("second")
+        before = peer.worktree_snapshot(str(folder))
+        target.write_text("third")
+        report = peer.worktree_report(before, peer.worktree_snapshot(str(folder)))
+        self.assertTrue(report["worktree_changed"])
+        self.assertEqual(report["changed_paths"], [" M src/tracked.txt"])
+
+    def test_index_and_permissions_change_on_an_already_dirty_file(self):
+        target = self.cwd / "tracked.txt"
+        target.write_text("first")
+        self.git("add", ".")
+        self.git("commit", "-qm", "Initial")
+        target.write_text("staged one")
+        before = peer.worktree_snapshot(str(self.cwd))
+        self.git("add", ".")
+        report = peer.worktree_report(before, peer.worktree_snapshot(str(self.cwd)))
+        self.assertTrue(report["worktree_changed"])
+        target.write_text("staged two")
+        self.git("add", ".")
+        target.write_text("working copy")
+        before = peer.worktree_snapshot(str(self.cwd))
+        target.write_text("staged three")
+        self.git("add", ".")
+        target.write_text("working copy")
+        report = peer.worktree_report(before, peer.worktree_snapshot(str(self.cwd)))
+        self.assertTrue(report["worktree_changed"])
+        before = peer.worktree_snapshot(str(self.cwd))
+        target.chmod(0o755)
+        self.assertTrue(peer.worktree_report(before, peer.worktree_snapshot(str(self.cwd)))["worktree_changed"])
+
+    def test_invalid_config_types_and_nonfinite_timeouts_are_json_errors(self):
+        for value in (["high"], {"level": "high"}, 1, True):
+            for command in ("doctor", "models"):
+                with self.subTest(value=value, command=command):
+                    self.config.write_text(json.dumps({"providers": {"codex": {"effort": value}}}))
+                    code, result = self.call(command)
+                    self.assertEqual(code, 2)
+                    self.assertEqual(result["status"], "error")
+                    self.assertEqual(self.stderr, "")
+        for value in (float("nan"), float("inf"), float("-inf"), 10 ** 400, True, 0, "600"):
+            with self.subTest(timeout=value):
+                self.config.write_text(json.dumps({"timeout_seconds": value}))
+                code, result = self.call("doctor")
+                self.assertEqual(code, 2)
+                self.assertIn("finite positive", result["error"])
+        self.assertFalse(self.log.exists())
+
+    def test_argument_errors_are_json(self):
+        code, result = self.call("ask", "--to", "unknown")
+        self.assertEqual(code, 2)
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(self.stderr, "")
+
+    def test_debate_preflights_both_sides_before_launch(self):
+        code, result = self.call("debate", "--a", "codex", "--b", "agy", "--effort-b", "max",
+                                 "--cwd", str(self.cwd), "--prompt", "Question")
+        self.assertEqual(code, 2)
+        self.assertFalse(self.log.exists())
+        with mock.patch.object(peer.shutil, "which", side_effect=lambda p: "codex" if p == "codex" else None):
+            code, result = self.call("debate", "--a", "codex", "--b", "claude",
+                                     "--cwd", str(self.cwd), "--prompt", "Question")
+        self.assertEqual(code, 2)
+        self.assertIn("claude CLI", result["error"])
+        self.assertFalse(self.log.exists())
+
+    def test_debate_retains_completed_turn_on_exception_and_without_saving(self):
+        first = {"status": "ok", "provider": "codex", "session_id": "resume-me", "response": "Answer"}
+        for no_save in (False, True):
+            with self.subTest(no_save=no_save), mock.patch.object(peer, "ask", side_effect=[
+                    first, ValueError("launch failed after preflight")]):
+                extra = ["--no-save"] if no_save else []
+                code, result = self.call("debate", "--a", "codex", "--b", "claude", "--cwd", str(self.cwd),
+                                         "--prompt", "Question", *extra)
+            self.assertEqual(code, 2)
+            self.assertEqual(result["sessions"]["codex"], "resume-me")
+            self.assertEqual(result["transcript"], [first])
+            if not no_save:
+                saved = json.loads(Path(result["output_file"]).read_text())
+                self.assertEqual(saved["transcript"], [first])
+
+    def test_session_name_write_failure_retains_successful_response(self):
+        for command, flags in (("ask", ["--to", "codex"]),
+                               ("debate", ["--a", "codex", "--b", "claude"])):
+            with self.subTest(command=command), mock.patch.object(peer, "bind_name", side_effect=OSError("read-only state")):
+                code, result = self.call(command, *flags, "--new-session", "review", "--cwd", str(self.cwd),
+                                         "--prompt", "Question")
+            self.assertEqual(code, 2)
+            if command == "ask":
+                self.assertEqual(result["session_id"], "codex-id")
+                self.assertEqual(result["response"], "codex reply")
+            else:
+                self.assertEqual(result["sessions"]["codex"], "codex-id")
+                self.assertEqual(result["transcript"][0]["response"], "codex reply")
+
+    def test_debate_relay_sends_brief_once_per_side(self):
+        with mock.patch.object(peer, "ask", wraps=peer.ask) as calls:
+            code, result = self.call("debate", "--a", "codex", "--b", "claude", "--rounds", "2",
+                                     "--cwd", str(self.cwd), "--prompt", "Unique original brief")
+        self.assertEqual(code, 0)
+        messages = [call.args[3] for call in calls.call_args_list]
+        self.assertTrue(all("Unique original brief" in message for message in messages[:2]))
+        self.assertTrue(all("Unique original brief" not in message for message in messages[2:]))
+        self.assertIn("claude reply", messages[2])
+
+    def test_fast_runs_have_distinct_files_and_sessions_sort_by_subsecond_time(self):
+        with mock.patch.object(peer.time, "strftime", return_value="20261013-001000"):
+            _, first = self.call("ask", "--to", "codex", "--cwd", str(self.cwd), "--prompt", "First")
+            with mock.patch.dict(os.environ, {"FAKE_SESSION": "newer-id"}):
+                _, second = self.call("ask", "--to", "codex", "--cwd", str(self.cwd), "--prompt", "Second")
+        self.assertNotEqual(first["output_file"], second["output_file"])
+        stamp = 1800000000 * 10 ** 9
+        os.utime(first["output_file"], ns=(stamp + 100, stamp + 100))
+        os.utime(second["output_file"], ns=(stamp + 200, stamp + 200))
+        _, result = self.call("sessions", "--cwd", str(self.cwd))
+        self.assertEqual([s["session_id"] for s in result["sessions"]], ["newer-id", "codex-id"])
+
+    def test_session_first_prompt_uses_run_time_not_filename_order(self):
+        runs = self.state / "peer" / "runs"
+        older, newer = runs / "z-older.json", runs / "a-newer.json"
+        self.call("ask", "--to", "codex", "--cwd", str(self.cwd), "--output", str(older), "--prompt", "Original")
+        self.call("ask", "--to", "codex", "--cwd", str(self.cwd), "--output", str(newer),
+                  "--session", "codex-id", "--prompt", "Follow-up")
+        stamp = 1800000000 * 10 ** 9
+        os.utime(older, ns=(stamp, stamp))
+        os.utime(newer, ns=(stamp + 10 ** 9, stamp + 10 ** 9))
+        _, result = self.call("sessions", "--cwd", str(self.cwd))
+        entry = result["sessions"][0]
+        self.assertEqual(entry["first_prompt"], "Original")
+        self.assertEqual(entry["runs"], 2)
+        self.assertEqual(entry["last_used"], time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(1800000001)))
+
+    def test_session_names_do_not_leak_between_workspaces(self):
+        other = Path(self.tmp.name) / "other"
+        other.mkdir()
+        self.call("ask", "--to", "codex", "--cwd", str(self.cwd), "--new-session", "here", "--prompt", "First")
+        self.call("ask", "--to", "codex", "--cwd", str(other), "--new-session", "there", "--prompt", "Second")
+        _, result = self.call("sessions", "--all")
+        entries = {entry["cwd"]: entry for entry in result["sessions"]}
+        self.assertEqual(entries[str(self.cwd.resolve())]["names"], ["here"])
+        self.assertEqual(entries[str(other.resolve())]["names"], ["there"])
 
 
 if __name__ == "__main__":
