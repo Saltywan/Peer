@@ -11,23 +11,25 @@ printf '%s' 'Review this design for failure modes.' | ./peer ask --to claude --m
 printf '%s' 'Implement the parser and run its tests.' | ./peer ask --to agy --mode work --cwd "$PWD"
 ```
 
-Each call prints one compact JSON object with `status`, `response`, `session_id`, and `output_file`. To continue a conversation, name it when you start it and resume it by name, or pass the returned ID with the same provider:
+Each call prints a short text result: a header line, then the answer. `--json` prints JSON instead. To hold a conversation, name it when you start it and continue it with `reply`:
 
 ```sh
 printf '%s' 'Review the parser.' | ./peer ask --to claude --new-session parser --cwd "$PWD"
-printf '%s' 'Check the edge cases too.' | ./peer ask --to claude --session-name parser --cwd "$PWD"
-printf '%s' 'Check the edge cases too.' | ./peer ask --to claude --session SESSION_ID --cwd "$PWD"
+printf '%s' 'Check the edge cases too.' | ./peer reply parser
+./peer show parser --last 3
 ```
+
+See [Conversations](#conversations) for the reply format, `show`, and `wait`. The skill's [CLI reference](skills/peer/references/cli.md) lists every flag and output field.
 
 Use `./peer doctor` to see installed CLI paths and configured defaults, `./peer models` for models and aliases, and `./peer sessions` for recent sessions in this directory. Use `./peer ask --help` for all flags. `--prompt` is available for short prompts; stdin keeps longer prompts out of shell arguments.
 
 ## Modes and permissions
 
-| Target | `consult` | `work` |
-| --- | --- | --- |
-| Codex | Enforced `read-only` sandbox, no approval prompts | `workspace-write` sandbox, no approval prompts |
-| Claude | `plan` with read/search tools | `acceptEdits`; optional `work_allowed_tools` for shell commands |
-| Antigravity | `plan` behavior and terminal sandbox | `accept-edits` and terminal sandbox; command permissions come from Antigravity settings |
+| Target | `consult` | `work` | `auto` |
+| --- | --- | --- | --- |
+| Codex | Enforced `read-only` sandbox, no approval prompts | `workspace-write` sandbox, no approval prompts | `workspace-write` sandbox with `auto_review` approval routing |
+| Claude | `plan` with read/search tools, `--permission-prompts none` | `acceptEdits`, `--permission-prompts none`; optional `work_allowed_tools` | `auto` permission classifier, `--permission-prompts none` |
+| Antigravity | `plan` behavior and terminal sandbox | `accept-edits` and terminal sandbox; command permissions come from Antigravity settings | `auto` mode and terminal sandbox |
 
 Peer never passes any provider's permission-bypass flag. A call is also limited by the **calling agent's** sandbox. If the caller cannot execute a CLI, access its saved sessions, or write to the target workspace, the child cannot override that boundary.
 
@@ -45,13 +47,13 @@ For strict consultation isolation, verify your target's mode in a throwaway dire
 
 ## Model and effort defaults
 
-Copy `config.example.json` to `~/.config/peer/config.json`, or pass `--config PATH`. This file stores preferences, not sessions. Unknown keys are rejected so that typos do not pass silently. The precedence is command flag, Peer config, then the provider's own default. Model names pass through unchanged unless they match an alias in `providers.PROVIDER.aliases`, for example `"aliases": {"sol": "gpt-6.1-sol"}`. Aliases are case-insensitive, come only from your config, and the result reports both the resolved `model` and the `model_alias`. `./peer models` shows aliases and lists Antigravity's models live; Codex and Claude Code have no CLI command that lists models. Effort values are checked against each CLI's supported vocabulary, then the CLI validates the model/effort pairing. When a CLI adds levels before Peer knows them, set `providers.PROVIDER.efforts` to the full list.
+Copy `config.example.json` to `~/.config/peer/config.json`, or pass `--config PATH`. This file stores preferences, not sessions. Unknown keys are rejected so that typos do not pass silently. The precedence is command flag, Peer config, then the provider's own default. Model names pass through unchanged unless they match an alias in `providers.PROVIDER.aliases`, for example `"aliases": {"sol": "gpt-6.2-sol"}`. Aliases are case-insensitive, come only from your config, and the result reports both the resolved `model` and the `model_alias`. `./peer models` shows aliases and lists Antigravity's models live; Codex and Claude Code have no CLI command that lists models. Effort values are checked against each CLI's supported vocabulary, then the CLI validates the model/effort pairing. When a CLI adds levels before Peer knows them, set `providers.PROVIDER.efforts` to the full list.
 
-Model guidance was checked on October 13, 2026. For Codex, [OpenAI recommends `gpt-6.1-sol`](https://learn.chatgpt.com/docs/models) for complex coding when available to your account. See [the model reference](skills/peer/references/models.md) for current examples, other providers, and how to check live choices. Peer has no built-in model allowlist and does not automatically replace an explicit model or alias.
+Model guidance was checked on November 18, 2026. For Codex, [OpenAI recommends `gpt-6.2-sol` / `gpt-6.1-sol`](https://learn.chatgpt.com/docs/models) for complex coding when available to your account. See [the model reference](skills/peer/references/models.md) for current examples, other providers, and how to check live choices. Peer has no built-in model allowlist and does not automatically replace an explicit model or alias.
 
 ```sh
 printf '%s' 'Find the bug and fix it.' | ./peer ask --to codex --mode work \
-  --model gpt-6.1-sol --effort high --cwd "$PWD"
+  --model gpt-6.2-sol --effort high --cwd "$PWD"
 ```
 
 ## Timeouts and interruption
@@ -66,15 +68,23 @@ printf '%s' 'Find the bug and fix it.' | ./peer ask --to codex --mode work \
 
 The file exists from the start of the run. Until the call finishes it holds `status: "running"` with `pid`, `started_at`, and `updated_at`, and about every 15 seconds Peer adds `elapsed_seconds`, `output_events`, `last_activity` (the child's latest streamed event, such as a Codex command), and any `session_id` seen so far. A debate keeps these under `current` and adds each finished turn. A `running` file whose `updated_at` stopped changing, or whose `pid` no longer exists, is stale: Peer was killed.
 
-Stdout carries only the JSON result; Peer writes nothing to stderr, so background output parses as JSON. Argument and configuration errors also return JSON with exit code 2; `--help` prints ordinary CLI help. All configured providers are validated before launch, including field types and finite positive timeouts. A successful call prints a compact result: the response and the fields needed to resume or check work, with `permission_warnings` as a count and `changed_paths` capped at 30 entries. Diagnostics, notices, exit codes, and full lists stay in the saved file. Failures print the full record. `--full` prints everything, as does `--no-save`, since there is no file to hold the rest.
+With `--output FILE`, Peer also links the file from the run directory, so session names, `show`, `wait`, and `sessions` still find the run.
 
-## Resuming
+Peer writes only to stdout, never stderr, so a background run's output is exactly its result. By default that result is text: one header line (`peer: STATUS | PROVIDER MODEL/EFFORT | MODE | session NAME ID | DURATION`), lines that need attention (error, permission notices, questions, changed paths, warning count, details not shown), `---`, and the answer. The saved-file path is printed for unnamed runs and failures, since a named run is found with `show NAME`. Argument and configuration errors exit with code 2 in the same format. `--json` prints compact JSON (the answer plus the fields needed to resume or check work, with `permission_warnings` as a count and `changed_paths` capped at 30 entries); `doctor` and `models` always print JSON. Diagnostics, notices, exit codes, details, and full lists stay in the saved file; failures show the error, notices, and the last 1,500 characters of diagnostics. `--full` prints everything, as does `--no-save`, since there is no file to hold the rest. All configured providers are validated before launch, including field types and finite positive timeouts.
+
+Measured on a 13-round review, the reply text was about 60% of what Peer added to the caller's context, and JSON wrapping cost about 6% more tokens than plain text. The reply format below is what keeps that small.
+
+## Conversations
+
+**Reply format.** Peer appends a short format request to every prompt: answer in at most `reply_words` words (default 400; `--words N` per call, `0` to turn it off), end with `QUESTIONS:` and one `- ` line per question when the caller's input is needed, and put longer evidence after a line containing only `---details---`. Peer splits the reply: the caller sees the answer and a `questions:` count, while the details are saved and reported as `details: N characters not shown`. Debates use the same format without questions, and each side receives the other's whole reply. The request costs the caller no context, since Peer adds it after the caller's prompt. Models do not always obey a word limit; the header reports an answer more than 25% over it.
+
+**Names, `reply`, forking, and worktrees.** `--new-session NAME` starts a conversation and records NAME for that provider and workspace in `$XDG_STATE_HOME/peer/session-names.json`, together with the call's mode, model, effort, word limit, and any managed worktree. `reply NAME` continues it with those settings, in the session's own workspace or worktree, so a follow-up needs only the name and the new message. A flag on `reply` overrides one setting and the override is saved. `--fork-from NAME` (or `--fork-session ID`) branches an existing Codex or Claude session into a new session without altering the original conversation, and can be paired with `--new-session NEW_NAME`. `--worktree [WT]` runs `ask` in an isolated Git worktree under `$XDG_STATE_HOME/peer/worktrees/` on branch `peer/<WT>`, keeping the main checkout untouched during parallel delegated edits. NAME is found from the session's workspace (or worktree) or any folder inside or above it, never from a sibling project; when a name has sessions with several providers (after a named debate), pass `--to`. If NAME already pointed at another session, `--new-session` repoints it and reports `replaced`. `ask --session-name NAME` is equivalent to `reply NAME --to PROVIDER`; names are 1–64 letters, digits, `.`, `_`, or `-`, and an unknown name fails instead of starting a new conversation.
+
+**`show` and `wait`.** `show NAME` prints the latest result again, `show NAME --details` prints the newest saved details with the prompt they answered, and `show NAME --last N` prints the last N prompts and answers, which lets a caller catch up after its context is compacted. `wait NAME` (or `wait FILE` for a run started with `--output FILE`) blocks until the run finishes, 540 seconds by default, and prints it. Exit code 3 means it is still running; `stale` means the Peer process died or stopped updating for five minutes.
 
 On every call, Peer passes the selected mode, model, and effort again, including when resuming a session. It always resumes by explicit ID or by a name you created. Do not use Codex `--ephemeral` or Claude `--no-session-persistence` with Peer.
 
-`--new-session NAME` starts a conversation and records NAME for that provider and directory in `$XDG_STATE_HOME/peer/session-names.json`. If NAME already pointed at another session, it is repointed and the result reports `replaced_session_id`. `--session-name NAME` resumes the recorded session, and fails if the name does not exist, so a reused name never silently continues an unrelated conversation. Names are 1–64 letters, digits, `.`, `_`, or `-`.
-
-`./peer sessions` lists up to 20 recent sessions for the current directory from the saved run files: provider, ID, names, number of runs, last use, and the first line of the first prompt. `--all` includes every directory.
+`./peer sessions` lists up to 20 recent sessions in the current workspace tree from the saved run files: names, provider, saved settings, ID, number of runs, last use, and the first line of the first prompt. `--all` includes every directory.
 
 ## Debate
 
@@ -83,7 +93,7 @@ printf '%s' 'Should this cache be write-through or write-back?' | \
   ./peer debate --a codex --b claude --rounds 2 --cwd "$PWD"
 ```
 
-`debate` alternates read-only consultations, returns the exchange plus both session IDs, and stops after the requested rounds or at the first failed turn. It checks both providers before starting and retains completed turns and known session IDs on later launch or session-name errors, including with `--no-save`. Successful stdout shows each turn as `{provider, response}`; failures and the saved file keep full turn details. Pass `--session-a` and `--session-b` to continue a previous pair, or use `--new-session NAME` and `--session-name NAME` to name both sides at once. `--model-a`, `--model-b`, `--effort-a`, and `--effort-b` set each side's model and effort; otherwise config applies. Attachments go with each side's first turn. Each side receives the current brief on its first turn, then only the latest exchange on later turns. Peer caps recursive calls from an agent it launched, so the outer caller coordinates the discussion.
+`debate` alternates read-only consultations, returns the exchange plus both session IDs, and stops after the requested rounds or at the first failed turn. It checks both providers before starting and retains completed turns and known session IDs on later launch or session-name errors, including with `--no-save`. Successful output shows each turn's answer and how many details characters were saved; failures and the saved file keep full turn details. Pass `--session-a` and `--session-b` to continue a previous pair, or use `--new-session NAME` and `--session-name NAME` to name both sides at once. `--model-a`, `--model-b`, `--effort-a`, and `--effort-b` set each side's model and effort; otherwise config applies. Attachments go with each side's first turn. Each side receives the current brief on its first turn, then only the latest exchange on later turns. Peer caps recursive calls from an agent it launched, so the outer caller coordinates the discussion.
 
 One round means A speaks once, then B replies to A. Two rounds make four provider calls: A → B → A → B. Peer passes up to 12,000 characters of each answer to the next provider and marks the cut when it truncates. Each provider call has its own timeout; the outer caller synthesizes the returned transcript.
 
@@ -118,4 +128,4 @@ The opt-in `tests/live_smoke.py` automates fresh consultation, named-session mem
 
 It accepts `--to`, `--timeout`, `--config`, `--model`, `--effort`, and `--output-dir` (an existing parent for a new fixture directory). It uses normal permissions, may incur provider usage, and retains fixtures, per-call results, and `summary.json` in the reported artifact directory. Run it in the background. These checks prove the tested host-to-target behavior; unchanged consultation files do not prove OS sandbox enforcement. Command permission/denial probes remain a separate live check.
 
-Provider references: [Codex sandbox and approvals](https://learn.chatgpt.com/docs/agent-approvals-security), [Claude CLI and permissions](https://code.claude.com/docs/en/cli-reference), [Antigravity headless permissions](https://www.agy.dev/docs/cli/headless/).
+Provider references: [Codex sandbox and approvals](https://learn.chatgpt.com/docs/agent-approvals-security), [Claude CLI and permissions](https://code.claude.com/docs/en/cli-reference), [Antigravity CLI reference](https://antigravity.google/docs/cli/reference), [Antigravity permissions](https://antigravity.google/docs/permissions).

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Peer"
+  short_description: "Consult or delegate work across Codex, Claude, and Antigravity"
+  default_prompt: "Use $peer to consult another coding agent or run a bounded debate on this task."
+
+policy:
+  allow_implicit_invocation: true

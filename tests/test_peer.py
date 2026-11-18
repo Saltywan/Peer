@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import signal
 import stat
 import subprocess
@@ -29,6 +30,30 @@ if sys.argv[1:] == ['models']:
     raise SystemExit(0)
 payload = sys.stdin.read()
 pathlib.Path(os.environ['FAKE_LOG']).write_text(json.dumps({'name': name, 'args': sys.argv[1:], 'stdin': payload}))
+if os.environ.get('FAKE_NONFATAL_WARN') == '1':
+    print('WARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)', file=sys.stderr)
+args = sys.argv[1:]
+forked = 'fork' in args or '--fork-session' in args
+if forked:
+    default_sid = name + '-fork-id'
+elif '--resume' in args:
+    default_sid = args[args.index('--resume') + 1]
+elif '--conversation' in args:
+    default_sid = args[args.index('--conversation') + 1]
+elif 'resume' in args:
+    default_sid = args[-2]
+else:
+    default_sid = name + '-id'
+sid = os.environ.get('FAKE_SESSION', default_sid)
+if name == 'codex':
+    if os.environ.get('FAKE_NO_SESSION') != '1':
+        print(json.dumps({'type': 'thread.started', 'thread_id': sid}), flush=True)
+elif name == 'claude':
+    print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': sid}), flush=True)
+    print(json.dumps({'type': 'assistant', 'session_id': sid, 'message': {'content': [{'type': 'tool_use', 'name': 'Read'}]}}), flush=True)
+    print(json.dumps({'type': 'user', 'session_id': sid, 'message': {'content': [{'type': 'tool_result', 'content': 'ok'}]}}), flush=True)
+else:
+    print(json.dumps({'event': 'init', 'conversation_id': sid}), flush=True)
 if os.environ.get('FAKE_SLEEP'):
     def on_term(*_):
         pathlib.Path(os.environ['FAKE_TERM_MARK']).write_text('term')
@@ -48,8 +73,6 @@ if os.environ.get('FAKE_HOST_DENY') == '1':
     print('open state_5.sqlite: operation not permitted', file=sys.stderr)
     raise SystemExit(1)
 if name == 'codex':
-    if os.environ.get('FAKE_NO_SESSION') != '1':
-        print(json.dumps({'type': 'thread.started', 'thread_id': os.environ.get('FAKE_SESSION', 'codex-id')}))
     if os.environ.get('FAKE_STRUCTURED_DENY') == '1':
         print(json.dumps({'type': 'item.completed', 'item': {'type': 'command_execution', 'aggregated_output': 'Permission denied by sandbox', 'exit_code': 1, 'status': 'failed'}}))
     if os.environ.get('FAKE_CRASH') == '1':
@@ -58,17 +81,20 @@ if name == 'codex':
         print(json.dumps({'type': 'item.completed', 'item': {'type': 'command_execution', 'aggregated_output': 'peer.py:9: permission denied|operation not permitted', 'exit_code': 0, 'status': 'completed'}}))
     print(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': reply}}))
 elif name == 'claude':
-    result = {'session_id': 'claude-id', 'result': reply, 'is_error': False}
+    result = {'type': 'result', 'subtype': 'success', 'session_id': sid, 'result': reply, 'is_error': False}
     if os.environ.get('FAKE_STRUCTURED_DENY') == '1':
         result['permission_denials'] = [{'tool': 'Bash', 'reason': 'approval required'}]
     print(json.dumps(result))
 else:
-    print(json.dumps({'event': 'init', 'conversation_id': 'agy-id'}))
     if os.environ.get('FAKE_STRUCTURED_DENY') == '1':
         print(json.dumps({'event': 'step_update', 'step_update': {'step_type': 'tool_call', 'error': 'permission denied'}}))
-    result = {'conversation_id': 'agy-id', 'status': 'SUCCESS', 'response': reply}
+    if os.environ.get('FAKE_TOOL_INFO_DENY') == '1':
+        print(json.dumps({'event': 'step_update', 'step_update': {'step_type': 'tool_call', 'tool_info': {'error': 'permission denied'}}}))
+    result = {'conversation_id': sid, 'status': 'SUCCESS', 'response': reply}
     if os.environ.get('FAKE_RESULT_DENY') == '1':
         result['denied_actions'] = [{'action': 'command', 'display_name': 'RunCommand'}]
+    if os.environ.get('FAKE_FINISHED_REASON'):
+        result['finished_reason'] = os.environ['FAKE_FINISHED_REASON']
     print(json.dumps({'event': 'result', 'result': result}))
 """
 
@@ -104,9 +130,16 @@ class PeerTests(unittest.TestCase):
     def call(self, *args):
         output, errors = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
-            code = peer.main(list(args) + ["--config", str(self.config)])
+            code = peer.main(list(args) + ["--config", str(self.config), "--json"])
         self.stderr = errors.getvalue()
         return code, json.loads(output.getvalue())
+
+    def text(self, *args):
+        output, errors = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            code = peer.main(list(args) + ["--config", str(self.config)])
+        self.stderr = errors.getvalue()
+        return code, output.getvalue()
 
     def logged(self):
         return json.loads(self.log.read_text())
@@ -170,8 +203,21 @@ class PeerTests(unittest.TestCase):
         self.assertEqual(result["status"], "blocked")
         self.assertIn("RunCommand", result["permission_notices"][0])
 
+    def test_agy_early_finished_reason_is_error(self):
+        with mock.patch.dict(os.environ, {"FAKE_FINISHED_REASON": "print_timeout"}):
+            code, result = self.call("ask", "--to", "agy", "--mode", "consult",
+                                     "--cwd", str(self.cwd), "--prompt", "Review")
+        self.assertEqual(code, 2)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("print_timeout", result["error"])
+        with mock.patch.dict(os.environ, {"FAKE_TOOL_INFO_DENY": "1"}):
+            code, result = self.call("ask", "--to", "agy", "--mode", "work",
+                                     "--cwd", str(self.cwd), "--prompt", "Run command")
+        self.assertEqual((code, result["status"]), (2, "blocked"))
+        self.assertTrue(result["permission_notices"])
+
     def test_host_filesystem_denial_is_blocked(self):
-        with mock.patch.dict(os.environ, {"FAKE_HOST_DENY": "1"}):
+        with mock.patch.dict(os.environ, {"FAKE_HOST_DENY": "1", "FAKE_NO_SESSION": "1"}):
             code, result = self.call("ask", "--to", "codex", "--mode", "consult",
                                      "--cwd", str(self.cwd), "--prompt", "Review")
         self.assertEqual(code, 2)
@@ -179,6 +225,14 @@ class PeerTests(unittest.TestCase):
         self.assertEqual(result["exit_code"], 1)
         self.assertEqual(result["error"], "codex was blocked before returning a session ID")
         self.assertTrue(result["permission_notices"])
+
+    def test_codex_nonfatal_startup_warning_is_not_blocked(self):
+        with mock.patch.dict(os.environ, {"FAKE_NONFATAL_WARN": "1"}):
+            code, result = self.call("ask", "--to", "codex", "--mode", "consult",
+                                     "--cwd", str(self.cwd), "--prompt", "Review")
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["permission_warnings"], 1)
 
     def test_structured_denials_are_blocked_for_every_provider(self):
         for provider in peer.PROVIDERS:
@@ -207,11 +261,15 @@ class PeerTests(unittest.TestCase):
         self.assertNotIn("--sandbox", command)
 
     def test_invalid_effort_fails_before_launch(self):
-        code, result = self.call("ask", "--to", "agy", "--effort", "max",
+        code, result = self.call("ask", "--to", "agy", "--effort", "ultra",
                                  "--cwd", str(self.cwd), "--prompt", "Hello")
         self.assertEqual(code, 2)
         self.assertIn("agy effort", result["error"])
         self.assertFalse(self.log.exists())
+        for level in ("xhigh", "max"):
+            code, result = self.call("ask", "--to", "agy", "--effort", level,
+                                     "--cwd", str(self.cwd), "--prompt", "Hello")
+            self.assertEqual((code, result["effort"]), (0, level))
 
     def test_bounded_debate_retains_both_ids(self):
         code, result = self.call("debate", "--a", "codex", "--b", "claude",
@@ -260,7 +318,7 @@ class PeerTests(unittest.TestCase):
         env = dict(os.environ, FAKE_SLEEP="30")
         proc = subprocess.Popen(
             [sys.executable, str(SCRIPT), "ask", "--to", "codex", "--cwd", str(self.cwd),
-             "--config", str(self.config), "--prompt", "Slow"],
+             "--config", str(self.config), "--prompt", "Slow", "--json"],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         pid_file = Path(os.environ["FAKE_PID"])
@@ -329,11 +387,11 @@ class PeerTests(unittest.TestCase):
         code, result = self.call("doctor")
         self.assertEqual(code, 2)
         self.assertIn("providers.agy.efort", result["error"])
-        self.config.write_text(json.dumps({"providers": {"agy": {"efforts": ["low", "max"]}}}))
-        code, result = self.call("ask", "--to", "agy", "--effort", "max",
+        self.config.write_text(json.dumps({"providers": {"agy": {"efforts": ["low", "ultra"]}}}))
+        code, result = self.call("ask", "--to", "agy", "--effort", "ultra",
                                  "--cwd", str(self.cwd), "--prompt", "Hello")
         self.assertEqual(result["status"], "ok")
-        self.assertIn("max", self.logged()["args"])
+        self.assertIn("ultra", self.logged()["args"])
 
     def test_stdout_is_one_compact_json_object_and_stderr_is_empty(self):
         code, result = self.call("ask", "--to", "codex", "--cwd", str(self.cwd), "--prompt", "Hi")
@@ -546,7 +604,7 @@ class PeerTests(unittest.TestCase):
         self.assertEqual(self.stderr, "")
 
     def test_debate_preflights_both_sides_before_launch(self):
-        code, result = self.call("debate", "--a", "codex", "--b", "agy", "--effort-b", "max",
+        code, result = self.call("debate", "--a", "codex", "--b", "agy", "--effort-b", "ultra",
                                  "--cwd", str(self.cwd), "--prompt", "Question")
         self.assertEqual(code, 2)
         self.assertFalse(self.log.exists())
@@ -632,6 +690,320 @@ class PeerTests(unittest.TestCase):
         entries = {entry["cwd"]: entry for entry in result["sessions"]}
         self.assertEqual(entries[str(self.cwd.resolve())]["names"], ["here"])
         self.assertEqual(entries[str(other.resolve())]["names"], ["there"])
+
+    STRUCTURED = ("Not ready. Two blockers:\n1. Stop fill (runner.py:221).\n\n**Questions:**\n"
+                  "- Flatten or cancel?\n2. Which account?\n\n---details---\nFull log line one.\nLine two.")
+
+    def test_text_output_is_a_header_then_the_answer(self):
+        code, text = self.text("ask", "--to", "codex", "--cwd", str(self.cwd), "--prompt", "Hi")
+        lines = text.splitlines()
+        self.assertEqual(code, 0)
+        self.assertTrue(lines[0].startswith("peer: ok | codex default model | consult | session codex-id"))
+        self.assertTrue(any(line.startswith("file: ") for line in lines))
+        self.assertEqual(lines[-2:], ["---", "codex reply"])
+        code, text = self.text("ask", "--to", "codex", "--cwd", str(self.cwd), "--new-session", "named",
+                               "--prompt", "Hi")
+        self.assertIn("| session named codex-id |", text.splitlines()[0])
+        self.assertNotIn("file: ", text)
+        code, text = self.text("reply", "missing", "--cwd", str(self.cwd), "--prompt", "Hi")
+        self.assertEqual(code, 2)
+        self.assertTrue(text.startswith("peer: error\nerror: no session named 'missing'"))
+        self.assertIn("names here: named (codex)", text)
+
+    def test_reply_contract_splits_answer_questions_and_details(self):
+        with mock.patch.dict(os.environ, {"FAKE_REPLY": self.STRUCTURED}):
+            code, result = self.call("ask", "--to", "codex", "--cwd", str(self.cwd), "--prompt", "Review")
+            _, text = self.text("ask", "--to", "codex", "--cwd", str(self.cwd), "--prompt", "Review")
+        self.assertIn("Reply format requested by the Peer bridge", self.logged()["stdin"])
+        self.assertIn("at most 400 words", self.logged()["stdin"])
+        self.assertNotIn("Full log", result["response"])
+        self.assertEqual(result["questions"], ["Flatten or cancel?", "Which account?"])
+        self.assertEqual(result["details_chars"], len("Full log line one.\nLine two."))
+        saved = json.loads(Path(result["output_file"]).read_text())
+        self.assertEqual(saved["details"], "Full log line one.\nLine two.")
+        self.assertIn("questions: 2", text)
+        self.assertIn("details: 28 characters not shown", text)
+        self.assertNotIn("Full log", text)
+        with mock.patch.dict(os.environ, {"FAKE_REPLY": self.STRUCTURED}):
+            code, result = self.call("ask", "--to", "codex", "--cwd", str(self.cwd), "--words", "0",
+                                     "--prompt", "Review")
+        self.assertNotIn("Reply format", self.logged()["stdin"])
+        self.assertEqual(result["response"], self.STRUCTURED)
+        self.assertNotIn("questions", result)
+
+    def test_split_reply_edge_cases(self):
+        self.assertEqual(peer.split_reply("Done.\nQUESTIONS: none", 400)[2], [])
+        self.assertEqual(peer.split_reply("Done.\nQuestions: Which one?", 400)[2], ["Which one?"])
+        self.assertEqual(peer.split_reply("Intro.\nQUESTIONS:\n- Mid-body?\n\nTrailing prose paragraph.", 400)[2], [])
+        self.assertEqual(peer.split_reply("---details---\nOnly details", 400)[:2], ("Only details", ""))
+        self.assertEqual(peer.split_reply("Text\n--- details ---\nMore", 400)[:2], ("Text", "More"))
+        self.assertEqual(peer.split_reply("Text\n---details---\nMore", 0), ("Text\n---details---\nMore", "", []))
+        fenced = "Summary:\n```markdown\nQUESTIONS:\n- Fake?\n---details---\nFenced body\n```\nReal conclusion.\n---details---\nReal details"
+        ans, det, qs = peer.split_reply(fenced, 400)
+        self.assertIn("Real conclusion.", ans)
+        self.assertEqual(det, "Real details")
+        self.assertEqual(qs, [])
+
+    def test_reply_inherits_settings_and_runs_in_the_session_workspace(self):
+        sub = self.cwd / "src" / "deep"
+        sub.mkdir(parents=True)
+        self.call("ask", "--to", "codex", "--mode", "work", "--model", "gpt-6-sol", "--effort", "high",
+                  "--words", "150", "--new-session", "build", "--cwd", str(self.cwd), "--prompt", "Build it")
+        code, result = self.call("reply", "build", "--cwd", str(sub), "--prompt", "Also handle empty input")
+        args = self.logged()["args"]
+        self.assertEqual(code, 0)
+        self.assertEqual(result["cwd"], str(self.cwd.resolve()))
+        self.assertEqual((result["mode"], result["model"], result["effort"]), ("work", "gpt-6-sol", "high"))
+        self.assertIn('sandbox_mode="workspace-write"', args)
+        self.assertIn("codex-id", args)
+        self.assertIn("at most 150 words", self.logged()["stdin"])
+        self.call("reply", "build", "--cwd", str(sub), "--effort", "low", "--prompt", "Lower effort now")
+        self.call("reply", "build", "--cwd", str(sub), "--prompt", "And keep it")
+        self.assertIn('model_reasoning_effort="low"', self.logged()["args"])
+
+    def test_names_resolve_up_and_down_the_tree_but_not_across(self):
+        child, sibling = self.cwd / "pkg", Path(self.tmp.name) / "sibling"
+        child.mkdir()
+        sibling.mkdir()
+        self.call("ask", "--to", "claude", "--new-session", "inner", "--cwd", str(child), "--prompt", "Hi")
+        code, result = self.call("reply", "inner", "--cwd", str(self.cwd), "--prompt", "From the parent")
+        self.assertEqual((code, result["cwd"]), (0, str(child.resolve())))
+        code, result = self.call("reply", "inner", "--cwd", str(sibling), "--prompt", "From a sibling")
+        self.assertEqual(code, 2)
+        _, listing = self.call("sessions", "--cwd", str(self.cwd))
+        self.assertEqual([e["names"] for e in listing["sessions"]], [["inner"]])
+        _, listing = self.call("sessions", "--cwd", str(sibling))
+        self.assertEqual(listing["sessions"], [])
+
+    def test_reply_needs_provider_when_a_name_has_several(self):
+        self.call("debate", "--a", "codex", "--b", "agy", "--rounds", "1", "--new-session", "pair",
+                  "--cwd", str(self.cwd), "--prompt", "Question")
+        code, result = self.call("reply", "pair", "--cwd", str(self.cwd), "--prompt", "Follow up")
+        self.assertEqual(code, 2)
+        self.assertIn("pass --to PROVIDER", result["error"])
+        code, result = self.call("reply", "pair", "--to", "agy", "--cwd", str(self.cwd), "--prompt", "Follow up")
+        self.assertEqual((code, result["provider"], result["session_id"]), (0, "agy", "agy-id"))
+
+    def test_show_details_last_and_json(self):
+        with mock.patch.dict(os.environ, {"FAKE_REPLY": self.STRUCTURED}):
+            self.call("ask", "--to", "codex", "--new-session", "rev", "--cwd", str(self.cwd), "--prompt", "Review")
+        self.call("reply", "rev", "--cwd", str(self.cwd), "--prompt", "Recheck")
+        code, text = self.text("show", "rev", "--cwd", str(self.cwd), "--details")
+        self.assertEqual(code, 0)
+        self.assertIn('you: "Review"', text)
+        self.assertIn("Full log line one.", text)
+        code, text = self.text("show", "rev", "--cwd", str(self.cwd), "--last", "2")
+        self.assertIn("peer: last 2 runs for rev", text)
+        self.assertIn('you: "Recheck"', text)
+        self.assertIn("Flatten or cancel?", text)
+        code, text = self.text("show", "--cwd", str(self.cwd))
+        self.assertTrue(text.startswith("peer: ok | codex"))
+        self.assertTrue(text.rstrip().endswith("codex reply"))
+        code, data = self.call("show", "rev", "--cwd", str(self.cwd))
+        self.assertEqual(data["prompt"], "Recheck")
+
+    def test_wait_reports_running_then_finished_and_stale(self):
+        out = Path(self.tmp.name) / "slow.json"
+        proc = subprocess.Popen(
+            [sys.executable, str(SCRIPT), "ask", "--to", "codex", "--cwd", str(self.cwd), "--config",
+             str(self.config), "--new-session", "slow", "--output", str(out), "--prompt", "Slow"],
+            env=dict(os.environ, FAKE_SLEEP="3"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(proc.wait)
+        code, text = self.text("wait", str(out), "--timeout", "0.5")
+        self.assertEqual(code, peer.EXIT_RUNNING)
+        self.assertTrue(text.startswith("peer: running | codex | session slow"))
+        code, text = self.text("wait", "slow", "--cwd", str(self.cwd), "--timeout", "20")
+        self.assertEqual(code, 0)
+        self.assertTrue(text.startswith("peer: ok | codex"))
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        stale = Path(self.tmp.name) / "stale.json"
+        peer.save_result(stale, {"status": "running", "pid": dead.pid, "providers": ["codex"],
+                                 "cwd": str(self.cwd), "started_at": peer.now(), "updated_at": peer.now()})
+        code, text = self.text("wait", str(stale), "--timeout", "1")
+        self.assertEqual(code, 2)
+        self.assertIn("peer: stale", text)
+
+    def test_debate_relays_details_but_prints_answers(self):
+        with mock.patch.dict(os.environ, {"FAKE_REPLY": self.STRUCTURED}), \
+                mock.patch.object(peer, "ask", wraps=peer.ask) as calls:
+            code, result = self.call("debate", "--a", "codex", "--b", "claude", "--rounds", "1",
+                                     "--cwd", str(self.cwd), "--prompt", "Question")
+        self.assertEqual(code, 0)
+        self.assertIn("Full log line one.", calls.call_args_list[1].args[3])
+        self.assertTrue(all(call.kwargs["debate"] for call in calls.call_args_list))
+        self.assertNotIn("QUESTIONS", self.logged()["stdin"].split("Reply format")[-1])
+        self.assertEqual(result["transcript"][0]["details_chars"], 28)
+        self.assertNotIn("Full log", json.dumps(result["transcript"]))
+
+    def test_reply_words_config_and_flag_validation(self):
+        self.config.write_text(json.dumps({"reply_words": -1}))
+        code, result = self.call("doctor")
+        self.assertEqual(code, 2)
+        self.assertIn("reply_words", result["error"])
+        self.config.write_text(json.dumps({"reply_words": 0}))
+        self.call("ask", "--to", "codex", "--cwd", str(self.cwd), "--prompt", "Hi")
+        self.assertNotIn("Reply format", self.logged()["stdin"])
+        code, result = self.call("ask", "--to", "codex", "--cwd", str(self.cwd), "--words", "-5", "--prompt", "Hi")
+        self.assertEqual(code, 2)
+        self.assertIn("--words", result["error"])
+
+    def test_claude_stream_json_heartbeat_and_timeout_recover_session(self):
+        records = []
+        real_save = peer.save_result
+
+        def capture(path, record):
+            records.append(dict(record))
+            real_save(path, record)
+
+        with mock.patch.object(peer, "HEARTBEAT_SECONDS", 0.1), \
+                mock.patch.object(peer, "save_result", side_effect=capture), \
+                mock.patch.dict(os.environ, {"FAKE_SLEEP": "1.5"}):
+            code, result = self.call("ask", "--to", "claude", "--cwd", str(self.cwd),
+                                     "--timeout", "0.4", "--prompt", "Slow claude")
+        self.assertEqual(code, 2)
+        self.assertEqual(result["status"], "timeout")
+        self.assertEqual(result["session_id"], "claude-id")
+        args = self.logged()["args"]
+        self.assertIn("stream-json", args)
+        self.assertIn("--verbose", args)
+        self.assertEqual(args[args.index("--permission-prompts") + 1], "none")
+        beats = [r for r in records if r.get("status") == "running" and r.get("session_id") == "claude-id"]
+        self.assertTrue(beats)
+        self.assertEqual(beats[-1]["last_activity"], "assistant tool_use Read")
+
+    def test_auto_mode_passes_provider_flags_and_tracks_changes(self):
+        with mock.patch.dict(os.environ, {"FAKE_EDIT": "1"}):
+            code, result = self.call("ask", "--to", "codex", "--mode", "auto",
+                                     "--cwd", str(self.cwd), "--prompt", "Fix and test")
+        self.assertEqual((code, result["mode"], result["worktree_changed"]), (0, "auto", True))
+        args = self.logged()["args"]
+        self.assertIn('approval_policy="on-request"', args)
+        self.assertIn('approvals_reviewer="auto_review"', args)
+        self.assertIn('sandbox_mode="workspace-write"', args)
+        code, result = self.call("ask", "--to", "claude", "--mode", "auto",
+                                 "--cwd", str(self.cwd), "--prompt", "Fix and test")
+        args = self.logged()["args"]
+        self.assertEqual(args[args.index("--permission-mode") + 1], "auto")
+        self.assertEqual(args[-2:], ["--allowedTools", "Bash(git diff *)"])
+        code, result = self.call("ask", "--to", "agy", "--mode", "auto",
+                                 "--cwd", str(self.cwd), "--prompt", "Fix and test")
+        args = self.logged()["args"]
+        self.assertEqual(args[args.index("--mode") + 1], "auto")
+
+    def test_session_forking_for_codex_and_claude_and_agy_error(self):
+        self.call("ask", "--to", "codex", "--mode", "work", "--effort", "high",
+                  "--new-session", "base", "--cwd", str(self.cwd), "--prompt", "Initial")
+        code, forked = self.call("ask", "--fork-from", "base", "--new-session", "branch",
+                                 "--cwd", str(self.cwd), "--prompt", "Try alternative")
+        self.assertEqual(code, 0)
+        self.assertEqual((forked["provider"], forked["mode"], forked["effort"]), ("codex", "work", "high"))
+        self.assertEqual((forked["session_id"], forked["forked_from"]), ("codex-fork-id", "codex-id"))
+        self.assertEqual(self.logged()["args"][:2], ["exec", "fork"])
+        self.assertIn("codex-id", self.logged()["args"])
+        # Original session name still points to codex-id; new name points to codex-fork-id.
+        _, orig = self.call("reply", "base", "--cwd", str(self.cwd), "--prompt", "Continue base")
+        self.assertEqual(orig["session_id"], "codex-id")
+        _, br = self.call("reply", "branch", "--cwd", str(self.cwd), "--prompt", "Continue branch")
+        self.assertEqual(br["session_id"], "codex-fork-id")
+        # Direct --fork-session on Claude
+        code, cfork = self.call("ask", "--to", "claude", "--fork-session", "claude-id",
+                                "--cwd", str(self.cwd), "--prompt", "Fork claude")
+        self.assertEqual((code, cfork["session_id"], cfork["forked_from"]), (0, "claude-fork-id", "claude-id"))
+        self.assertIn("--fork-session", self.logged()["args"])
+        # Antigravity rejects fork before launch
+        code, err = self.call("ask", "--to", "agy", "--fork-session", "agy-id",
+                              "--cwd", str(self.cwd), "--prompt", "Fork agy")
+        self.assertEqual(code, 2)
+        self.assertIn("does not support session forking", err["error"])
+
+    def test_managed_git_worktree_isolates_edits_and_persists_across_replies(self):
+        (self.cwd / "tracked.txt").write_text("base\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "Initial")
+        with mock.patch.dict(os.environ, {"FAKE_EDIT": "1"}):
+            code, result = self.call("ask", "--to", "codex", "--mode", "work",
+                                     "--new-session", "iso", "--worktree",
+                                     "--cwd", str(self.cwd), "--prompt", "Edit in worktree")
+        self.assertEqual(code, 0)
+        wt_path = Path(result["worktree"])
+        self.assertEqual(result["worktree_branch"], "peer/iso")
+        self.assertNotEqual(wt_path, self.cwd.resolve())
+        self.assertTrue((wt_path / "edited.txt").exists())
+        self.assertFalse((self.cwd / "edited.txt").exists())
+        self.assertEqual(result["changed_paths"], ["?? edited.txt"])
+        # reply from the main checkout runs in the worktree automatically
+        code, follow = self.call("reply", "iso", "--cwd", str(self.cwd), "--prompt", "Follow up")
+        self.assertEqual((code, follow["cwd"], follow["worktree"]), (0, str(wt_path), str(wt_path)))
+        # show and sessions from the main checkout find the worktree session
+        code, shown = self.text("show", "iso", "--cwd", str(self.cwd))
+        self.assertEqual(code, 0)
+        self.assertIn("worktree: {} (branch peer/iso)".format(wt_path), shown)
+        _, listing = self.call("sessions", "--cwd", str(self.cwd))
+        self.assertEqual(listing["sessions"][0]["worktree"], str(wt_path))
+        # Commit on peer/iso, remove worktree checkout, and verify recreating reattaches without resetting peer/iso
+        subprocess.run(["git", "-c", "user.name=Peer Tests", "-c", "user.email=tests@example.invalid",
+                        "add", "."], cwd=wt_path, check=True)
+        subprocess.run(["git", "-c", "user.name=Peer Tests", "-c", "user.email=tests@example.invalid",
+                        "commit", "-qm", "Worktree commit"], cwd=wt_path, check=True)
+        shutil.rmtree(wt_path)
+        code, reattached = self.call("ask", "--to", "codex", "--mode", "consult",
+                                     "--worktree", "iso", "--cwd", str(self.cwd), "--prompt", "Check")
+        self.assertEqual(code, 0)
+        self.assertTrue((Path(reattached["worktree"]) / "edited.txt").exists())
+
+    def test_show_scopes_to_exact_workspace_over_newer_child_with_same_name(self):
+        child = self.cwd / "sub"
+        child.mkdir()
+        with mock.patch.dict(os.environ, {"FAKE_SESSION": "parent-sid", "FAKE_REPLY": "parent answer"}):
+            self.call("ask", "--to", "codex", "--new-session", "same",
+                      "--cwd", str(self.cwd), "--prompt", "Parent prompt")
+        with mock.patch.dict(os.environ, {"FAKE_SESSION": "child-sid", "FAKE_REPLY": "child answer"}):
+            self.call("ask", "--to", "codex", "--new-session", "same",
+                      "--cwd", str(child), "--prompt", "Child prompt")
+        code, data = self.call("show", "same", "--cwd", str(self.cwd))
+        self.assertEqual((code, data["session_id"], data["response"]), (0, "parent-sid", "parent answer"))
+        code, cdata = self.call("show", "same", "--cwd", str(child))
+        self.assertEqual((code, cdata["session_id"], cdata["response"]), (0, "child-sid", "child answer"))
+
+    def test_show_includes_latest_failed_run_and_json_named_session(self):
+        self.call("ask", "--to", "codex", "--new-session", "review.json",
+                  "--cwd", str(self.cwd), "--prompt", "Initial")
+        code, data = self.call("show", "review.json", "--cwd", str(self.cwd))
+        self.assertEqual((code, data["session_name"]), (0, "review.json"))
+        with mock.patch.dict(os.environ, {"FAKE_FAIL_PROVIDER": "codex"}):
+            fcode, _ = self.call("reply", "review.json", "--cwd", str(self.cwd), "--prompt", "Fail turn")
+        self.assertEqual(fcode, 2)
+        code, latest = self.call("show", "review.json", "--cwd", str(self.cwd))
+        self.assertEqual((code, latest["status"], latest["prompt"]), (0, "error", "Fail turn"))
+
+    def test_saved_worktree_rejects_drifted_branch(self):
+        (self.cwd / "tracked.txt").write_text("base\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "Initial")
+        _, result = self.call("ask", "--to", "codex", "--new-session", "wtcheck", "--worktree",
+                              "--cwd", str(self.cwd), "--prompt", "Start")
+        wt_path = Path(result["worktree"])
+        subprocess.run(["git", "checkout", "-qb", "other-branch"], cwd=wt_path, check=True)
+        code, err = self.call("reply", "wtcheck", "--cwd", str(self.cwd), "--prompt", "Resume")
+        self.assertEqual(code, 2)
+        self.assertIn("does not match repository", err["error"])
+        self.assertIn("on branch peer/wtcheck", err["error"])
+
+    def test_modular_split_keeps_files_focused(self):
+        paths = [SCRIPT] + [SCRIPT.parent / "peer_lib" / name for name in (
+            "__init__.py", "constants.py", "config.py", "workspace.py",
+            "providers.py", "storage.py", "render.py",
+        )]
+        for path in paths:
+            self.assertTrue(path.is_file(), "missing module: {}".format(path))
+            lines = path.read_text(encoding="utf-8").splitlines()
+            self.assertLess(len(lines), 450, "{} has {} lines".format(path.name, len(lines)))
+        root_link = SCRIPT.parents[3] / "peer"
+        if root_link.exists():
+            proc = subprocess.run([sys.executable, str(root_link), "doctor", "--config", str(self.config)],
+                                  capture_output=True, text=True, check=True)
+            self.assertEqual(json.loads(proc.stdout)["status"], "ok")
 
 
 if __name__ == "__main__":

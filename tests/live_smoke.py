@@ -49,7 +49,7 @@ def main():
     def call(label, mode, prompt, *session):
         flags = ["ask", "--to", args.to, "--mode", mode, "--cwd", str(workspace),
                  "--timeout", str(args.timeout), "--output", str(artifacts / (label + ".json")),
-                 "--prompt", prompt, *session]
+                 "--prompt", prompt, "--json", *session]
         for option in ("config", "model", "effort"):
             if getattr(args, option) is not None:
                 flags.extend(["--" + option, getattr(args, option)])

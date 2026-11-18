@@ -1,6 +1,7 @@
 {
   "timeout_seconds": 600,
   "output_dir": null,
+  "reply_words": 400,
   "providers": {
     "codex": {
       "model": null,
