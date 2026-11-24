@@ -24,14 +24,14 @@ Check `/model` in a signed-in interactive session. Built-in `--effort` levels ar
 
 ## Antigravity CLI
 
-Live catalog checked on 2026-11-18 (`agy` 1.5.9):
+Live catalog checked on 2026-11-24 (`agy` 1.5.16; legacy/lower-tier entries omitted):
 
-- `gemini-4-argon-{high,medium,low}`
+- `gemini-4-neon-{xhigh,high,medium,low}`
+- `gemini-4-carbon-{high,medium,low}`
 - `gemini-4-hydrogen-{xhigh,high,medium,low}`
-- `gemini-pro-orchestrator-g1-pro`
-- `gemini-3.8-flash-{high,medium,low}`
+- `gemini-pro-orchestrator-neon` (Orchestrator (Neon))
+- `gemini-pro-orchestrator` (Orchestrator (Carbon))
 - `claude-opus-5-5-{high,medium,low}`
 - `claude-sonnet-5-5-{high,medium,low}`
-- `gpt-oss-120b-medium`
 
-`gemini-4-carbon-{high,medium,low}` is also available when connected via `GEMINI_API_KEY` or `AGY_ADC_AUTH`. Expand braces to one exact ID, such as `gemini-4-argon-high`, or pass a base model name such as `gemini-4-argon` (with or without `--effort`, which accepts `low`, `medium`, `high`, `xhigh`, and `max`). Refresh with `agy models` or `peer models`; a catalog entry does not guarantee an account can execute it.
+Orchestrator dynamically pairs a planner/reviewer model with an executor (`gemini-4-hydrogen`); `agy models` exposes the preset orchestrator IDs above (custom planner/executor model and reasoning combinations are configured in Antigravity's Orchestrator Settings rather than separate CLI IDs). Expand braces to one exact ID, such as `gemini-4-neon-high`, or pass a base model name such as `gemini-4-neon` (with or without `--effort`, which accepts `low`, `medium`, `high`, `xhigh`, and `max`). Refresh with `agy models` or `peer models`; a catalog entry does not guarantee an account can execute it.
