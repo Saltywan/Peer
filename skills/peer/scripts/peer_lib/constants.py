@@ -15,7 +15,14 @@ EFFORTS = {
     "agy": {"low", "medium", "high", "xhigh", "max"},
 }
 CONFIG_KEYS = {"timeout_seconds", "output_dir", "reply_words", "providers"}
-PROVIDER_KEYS = {"model", "effort", "efforts", "aliases", "work_allowed_tools"}
+PROVIDER_KEYS = {"model", "effort", "efforts", "aliases", "work_allowed_tools", "extra_args"}
+VALUE_FLAGS = {
+    "--to", "--mode", "--model", "--effort", "--new-session", "--session", "--session-name",
+    "--fork-from", "--fork-session", "--cwd", "--timeout", "--config", "--prompt", "--words",
+    "--attach", "--output", "--extra-arg", "--extra-arg-a", "--extra-arg-b", "--a", "--b",
+    "--rounds", "--session-a", "--session-b", "--model-a", "--model-b", "--effort-a",
+    "--effort-b", "--last",
+}
 DENIAL = re.compile(
     r"soft[- ]denied|permission denied|operation not permitted|read[- ]only (?:database|file system)|permission[^\n]*(?:denied|not granted|required)|"
     r"approval[^\n]*(?:denied|required|unavailable|cannot)|"
@@ -48,7 +55,7 @@ COMPACT_LIST_LIMIT = 30
 COMPACT_KEYS = (
     "status", "provider", "mode", "cwd", "origin_cwd", "worktree", "worktree_branch",
     "session_id", "session_name", "forked_from", "replaced_session_id",
-    "model", "model_alias", "effort", "response", "response_chars", "response_words",
+    "model", "model_alias", "effort", "extra_args", "response", "response_chars", "response_words",
     "questions", "details_chars", "worktree_changed", "worktree_note", "changed_paths",
     "attachments", "output_file", "duration_seconds",
 )
@@ -56,13 +63,14 @@ EXIT_RUNNING = 3
 
 __all__ = [
     "PROVIDERS", "MODES", "WORK_MODES", "EFFORTS", "CONFIG_KEYS", "PROVIDER_KEYS",
-    "DENIAL", "NONFATAL_STDERR", "FENCE_LINE", "NAME_PATTERN", "IMAGE_SUFFIXES",
+    "VALUE_FLAGS", "DENIAL", "NONFATAL_STDERR", "FENCE_LINE", "NAME_PATTERN", "IMAGE_SUFFIXES",
     "SKIP_DIRS", "DEFAULT_TIMEOUT", "DEFAULT_REPLY_WORDS", "WAIT_SECONDS",
     "WAIT_POLL_SECONDS", "STALE_SECONDS", "DIAGNOSTIC_TAIL", "DETAILS_LINE",
     "QUESTIONS_LINE", "LIST_ITEM", "STOP_GRACE_SECONDS", "HEARTBEAT_SECONDS",
     "RELAY_LIMIT", "FILE_SCAN_LIMIT", "COMPACT_LIST_LIMIT", "COMPACT_KEYS",
     "EXIT_RUNNING", "Terminated", "JsonArgumentParser", "raise_terminated",
-    "install_signal_handlers", "ignore_signals", "now", "register_peer", "peer_attr",
+    "install_signal_handlers", "ignore_signals", "now", "split_passthrough",
+    "register_peer", "peer_attr",
 ]
 
 _PEER_GLOBALS = None
@@ -98,6 +106,20 @@ def ignore_signals():
 
 def now():
     return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def split_passthrough(argv):
+    """Split argv at the first standalone '--' (ignoring values of flags) into (peer_argv, extra)."""
+    skip_next = False
+    for index, token in enumerate(argv):
+        if skip_next:
+            skip_next = False
+            continue
+        if token == "--":
+            return argv[:index], argv[index + 1:]
+        if token in VALUE_FLAGS:
+            skip_next = True
+    return argv, []
 
 
 def register_peer(namespace):

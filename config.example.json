@@ -6,16 +6,19 @@
     "codex": {
       "model": null,
       "effort": null,
-      "aliases": {}
+      "aliases": {},
+      "extra_args": []
     },
     "claude": {
       "model": null,
       "effort": null,
-      "work_allowed_tools": []
+      "work_allowed_tools": [],
+      "extra_args": []
     },
     "agy": {
       "model": null,
-      "effort": null
+      "effort": null,
+      "extra_args": []
     }
   }
 }

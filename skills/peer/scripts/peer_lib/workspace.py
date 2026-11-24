@@ -22,7 +22,7 @@ __all__ = [
     "names_file", "read_names", "locked_names", "check_name", "tree_rank",
     "resolve_name", "resolve_target_scope", "bind_name", "session_settings",
     "verify_worktree", "prepare_worktree", "normalize_cwd", "resolve_attachments",
-    "outside_dirs", "native_attachment", "git_output", "content_token",
+    "outside_dirs", "worktree_git_dir", "native_attachment", "git_output", "content_token",
     "git_snapshot", "committed_paths", "file_snapshot", "worktree_snapshot",
     "worktree_report",
 ]
@@ -109,7 +109,7 @@ def resolve_name(name, cwd, provider=None):
         raise ValueError("session '{}' belongs to {}, which no longer exists".format(name, directory))
     return {"provider": owner, "cwd": directory, "session_id": entry["session_id"],
             "settings": {key: entry.get(key) for key in ("mode", "model", "effort", "words",
-                                                         "worktree", "worktree_branch")}}
+                                                         "worktree", "worktree_branch", "extra_args")}}
 
 
 def resolve_target_scope(name, cwd, provider=None):
@@ -152,10 +152,11 @@ def bind_name(provider, cwd, name, session_id, settings=None):
     return previous if previous != session_id else None
 
 
-def session_settings(result):
+def session_settings(result, extra_args=None):
     return {"mode": result.get("mode"), "model": result.get("model"), "effort": result.get("effort"),
             "words": result.get("reply_words"), "worktree": result.get("worktree"),
-            "worktree_branch": result.get("worktree_branch")}
+            "worktree_branch": result.get("worktree_branch"),
+            "extra_args": list(extra_args) if extra_args else None}
 
 
 def verify_worktree(origin_cwd, worktree_path, expected_branch=None):
@@ -245,6 +246,23 @@ def outside_dirs(attachments, cwd):
         if parent != cwd and not parent.startswith(cwd + os.sep):
             dirs.add(parent)
     return sorted(dirs)
+
+
+def worktree_git_dir(cwd):
+    """Return the external Git common dir when cwd is inside a linked Git worktree, else None."""
+    top_raw = git_output(cwd, "rev-parse", "--show-toplevel")
+    if not top_raw:
+        return None
+    top = os.path.realpath(os.fsdecode(top_raw.rstrip(b"\n")))
+    if not os.path.isfile(os.path.join(top, ".git")):
+        return None
+    common_raw = git_output(top, "rev-parse", "--git-common-dir")
+    if not common_raw:
+        return None
+    common = os.path.realpath(os.path.join(top, os.fsdecode(common_raw.rstrip(b"\n"))))
+    if common == cwd or common.startswith(cwd + os.sep):
+        return None
+    return common if os.path.isdir(common) else None
 
 
 def native_attachment(provider, path):

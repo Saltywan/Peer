@@ -20,6 +20,7 @@ Start a conversation, or send one unnamed turn.
 | `--worktree [NAME]` | Create or reuse an isolated Git worktree under `$XDG_STATE_HOME/peer/worktrees/` on branch `peer/<NAME>` (defaults to `--new-session` or a timestamp; starts from committed `HEAD` when creating a new branch, or reattaches to an existing `peer/<NAME>` branch) and run the call there. Saved on named sessions so `reply NAME` continues in the worktree. |
 | `--model NAME` | Flag, then the session's saved model, then provider config, then the provider default. Config aliases resolve case-insensitively. |
 | `--effort LEVEL` | Same precedence as `--model`; checked against the provider's accepted levels. |
+| `--extra-arg ARG` / `-- ...` | Extra flags/arguments forwarded to the target CLI (`--extra-arg=--flag` is repeatable; or append raw flags after `--`). Combined after `providers.PROVIDER.extra_args` from config, and saved on named sessions for `reply`. Passing a bypass flag (`--dangerously-skip-permissions` for `agy`/`claude`, `--dangerously-bypass-approvals-and-sandbox` for `codex`) skips Peer's conflicting sandbox/permission flags. |
 
 `--session`, `--session-name`, `--fork-from`, and `--fork-session` are mutually exclusive; `--new-session` can be used alone or with `--fork-from` / `--fork-session`.
 
@@ -40,6 +41,7 @@ Continue the session saved as NAME. It runs in the session's own workspace with 
 | `--session-a ID`, `--session-b ID` | Continue known native IDs. |
 | `--new-session NAME` / `--session-name NAME` | Start and name both sides, or continue both. Not combined with `--session-a/-b`. |
 | `--model-a`, `--model-b`, `--effort-a`, `--effort-b` | Per-side model and effort; otherwise config applies. |
+| `--extra-arg-a`, `--extra-arg-b` | Repeatable extra CLI flags for side A or side B (e.g. `--extra-arg-a=--dangerously-skip-permissions`). Use these instead of `--` on `debate`. |
 
 Both sides are checked before the first call. A failed turn stops the debate and keeps completed turns and session IDs. The other side receives each whole reply, details included, up to 12,000 characters with a truncation marker; you see each turn's answer and a details count. A side's first turn includes the brief; later turns send only the newest exchange.
 

@@ -990,6 +990,114 @@ class PeerTests(unittest.TestCase):
         self.assertIn("does not match repository", err["error"])
         self.assertIn("on branch peer/wtcheck", err["error"])
 
+    def test_agy_work_and_auto_pass_proceed_in_sandbox_and_worktree_git_dir(self):
+        code, _ = self.call("ask", "--to", "agy", "--mode", "consult", "--cwd", str(self.cwd), "--prompt", "Review")
+        self.assertEqual(code, 0)
+        args = self.logged()["args"]
+        self.assertIn("--sandbox", args)
+        self.assertNotIn("--settings", args)
+        for mode in ("work", "auto"):
+            code, _ = self.call("ask", "--to", "agy", "--mode", mode, "--cwd", str(self.cwd), "--prompt", "Edit")
+            self.assertEqual(code, 0)
+            args = self.logged()["args"]
+            self.assertIn("--sandbox", args)
+            self.assertIn("--settings", args)
+            self.assertEqual(json.loads(args[args.index("--settings") + 1]),
+                             {"toolPermission": "proceed-in-sandbox"})
+        # Custom --settings in extra args suppresses Peer's default --settings
+        code, _ = self.call("ask", "--to", "agy", "--mode", "work", "--cwd", str(self.cwd),
+                            "--extra-arg=--settings", '--extra-arg={"toolPermission":"strict"}',
+                            "--prompt", "Edit")
+        self.assertEqual(code, 0)
+        args = self.logged()["args"]
+        self.assertEqual(args.count("--settings"), 1)
+        self.assertEqual(json.loads(args[args.index("--settings") + 1]), {"toolPermission": "strict"})
+        # Linked Git worktree automatically exposes only .git common dir to agy
+        (self.cwd / "tracked.txt").write_text("base\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "Initial")
+        code, wt_res = self.call("ask", "--to", "agy", "--mode", "work", "--worktree", "agywt",
+                                 "--cwd", str(self.cwd), "--prompt", "Edit in worktree")
+        self.assertEqual(code, 0)
+        args = self.logged()["args"]
+        expected_git = str((self.cwd / ".git").resolve())
+        self.assertIn("--add-dir", args)
+        self.assertEqual(args[args.index("--add-dir") + 1], expected_git)
+        self.assertNotEqual(wt_res["cwd"], str(self.cwd.resolve()))
+
+    def test_extra_args_via_cli_passthrough_config_and_session_persistence(self):
+        # Passthrough via -- on agy skips --sandbox and default --settings
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = peer.main(["ask", "--to", "agy", "--mode", "work", "--new-session", "agy-bypass",
+                              "--cwd", str(self.cwd), "--config", str(self.config), "--json",
+                              "--prompt", "Run anything", "--", "--dangerously-skip-permissions"])
+        result = json.loads(out.getvalue())
+        self.assertEqual((code, result["status"], result["extra_args"]),
+                         (0, "ok", ["--dangerously-skip-permissions"]))
+        args = self.logged()["args"]
+        self.assertIn("--dangerously-skip-permissions", args)
+        self.assertNotIn("--sandbox", args)
+        self.assertNotIn("--settings", args)
+        # reply inherits saved extra_args without duplicating config extra_args
+        self.config.write_text(json.dumps({"providers": {
+            "agy": {"extra_args": ["--disable-slash-commands"]},
+            "claude": {"work_allowed_tools": ["Bash(git diff *)"]},
+        }}))
+        _, doc = self.call("doctor")
+        self.assertEqual(doc["providers"]["agy"]["extra_args"], ["--disable-slash-commands"])
+        code, text = self.text("reply", "agy-bypass", "--cwd", str(self.cwd), "--prompt", "Continue")
+        self.assertEqual(code, 0)
+        self.assertIn("extra args: --disable-slash-commands --dangerously-skip-permissions", text)
+        args = self.logged()["args"]
+        self.assertEqual(args.count("--disable-slash-commands"), 1)
+        self.assertEqual(args.count("--dangerously-skip-permissions"), 1)
+        self.assertNotIn("--sandbox", args)
+        # Claude bypass omits --permission-mode and puts extra args before variadic --allowedTools
+        code, _ = self.call("ask", "--to", "claude", "--mode", "work", "--cwd", str(self.cwd),
+                            "--extra-arg=--dangerously-skip-permissions", "--prompt", "Edit")
+        self.assertEqual(code, 0)
+        args = self.logged()["args"]
+        self.assertNotIn("--permission-mode", args)
+        self.assertLess(args.index("--dangerously-skip-permissions"), args.index("--allowedTools"))
+        # Codex bypass omits default approval_policy/sandbox_mode and puts extra args before -C/-
+        code, _ = self.call("ask", "--to", "codex", "--mode", "work", "--cwd", str(self.cwd),
+                            "--extra-arg=--dangerously-bypass-approvals-and-sandbox", "--prompt", "Edit")
+        self.assertEqual(code, 0)
+        args = self.logged()["args"]
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", args)
+        self.assertFalse(any("sandbox_mode=" in a for a in args))
+        self.assertLess(args.index("--dangerously-bypass-approvals-and-sandbox"), args.index("-C"))
+        # Invalid config extra_args type fails cleanly
+        self.config.write_text(json.dumps({"providers": {"agy": {"extra_args": "--bad"}}}))
+        code, err_res = self.call("doctor")
+        self.assertEqual(code, 2)
+        self.assertIn("extra_args", err_res["error"])
+
+    def test_debate_extra_args_and_passthrough_errors(self):
+        code, result = self.call("debate", "--a", "codex", "--b", "agy", "--rounds", "1",
+                                 "--extra-arg-a=--ephemeral", "--extra-arg-b=--dangerously-skip-permissions",
+                                 "--cwd", str(self.cwd), "--prompt", "Debate it")
+        self.assertEqual(code, 0)
+        # Last turn was agy with --dangerously-skip-permissions and no --sandbox
+        args = self.logged()["args"]
+        self.assertIn("--dangerously-skip-permissions", args)
+        self.assertNotIn("--sandbox", args)
+        # -- on debate is rejected cleanly
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = peer.main(["debate", "--a", "codex", "--b", "agy", "--cwd", str(self.cwd),
+                              "--config", str(self.config), "--json", "--prompt", "Q", "--", "--foo"])
+        self.assertEqual(code, 2)
+        self.assertIn("--extra-arg-a", json.loads(out.getvalue())["error"])
+        # -- on show is rejected cleanly
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = peer.main(["show", "--cwd", str(self.cwd), "--config", str(self.config),
+                              "--json", "--", "--foo"])
+        self.assertEqual(code, 2)
+        self.assertIn("ask and reply", json.loads(out.getvalue())["error"])
+
     def test_modular_split_keeps_files_focused(self):
         paths = [SCRIPT] + [SCRIPT.parent / "peer_lib" / name for name in (
             "__init__.py", "constants.py", "config.py", "workspace.py",

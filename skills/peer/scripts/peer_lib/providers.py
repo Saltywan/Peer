@@ -9,22 +9,18 @@ import time
 
 from peer_lib.constants import (
     DENIAL,
-    DETAILS_LINE,
-    FENCE_LINE,
     HEARTBEAT_SECONDS,
-    LIST_ITEM,
     NONFATAL_STDERR,
-    QUESTIONS_LINE,
     STOP_GRACE_SECONDS,
     WORK_MODES,
     Terminated,
     ignore_signals,
     peer_attr,
 )
-from peer_lib.workspace import native_attachment, outside_dirs
+from peer_lib.workspace import native_attachment, outside_dirs, worktree_git_dir
 
 __all__ = [
-    "prompt_for_mode", "reply_contract", "split_reply", "full_reply",
+    "prompt_for_mode", "reply_contract",
     "build_command", "json_lines", "parse_codex", "parse_claude", "parse_agy",
     "PARSERS", "last_activity", "matches", "permission_signals",
     "stop_process_group", "pump", "feed", "run_process",
@@ -61,93 +57,50 @@ def reply_contract(words, mode, debate=False):
     return "\n".join(lines)
 
 
-def _toggle_fence(fence, line):
-    m = FENCE_LINE.match(line)
-    if not m:
-        return fence, False
-    marker = m.group(1)
-    if fence is None:
-        return (marker[0], len(marker)), True
-    if marker[0] == fence[0] and len(marker) >= fence[1] and not line[m.end():].strip():
-        return None, True
-    return fence, True
+def _has_flag(extra_args, *flags):
+    return any(arg == flag or arg.startswith(flag + "=") for arg in extra_args for flag in flags)
 
 
-def split_reply(text, contract):
-    """Split a reply into the answer, details after the marker, and questions for the caller."""
-    text = text or ""
-    if not contract:
-        return text, "", []
-    raw_lines = text.splitlines()
-    fence, split_at = None, None
-    for index, line in enumerate(raw_lines):
-        fence, toggled = _toggle_fence(fence, line)
-        if not toggled and fence is None and DETAILS_LINE.match(line):
-            split_at = index
-            break
-    if split_at is not None:
-        answer = "\n".join(raw_lines[:split_at]).rstrip()
-        details = "\n".join(raw_lines[split_at + 1:]).strip()
-    else:
-        answer, details = text.strip(), ""
-    if not answer:
-        answer, details = details, ""
-    questions, lines, fence, q_index = [], answer.splitlines(), None, None
-    for index, line in enumerate(lines):
-        fence, toggled = _toggle_fence(fence, line)
-        if not toggled and fence is None and QUESTIONS_LINE.match(line):
-            q_index = index
-    if q_index is not None:
-        inline = QUESTIONS_LINE.match(lines[q_index]).group(1).strip()
-        if inline and inline.lower().rstrip(".") not in ("none", "n/a", "no"):
-            questions.append(inline)
-        for follow in lines[q_index + 1:]:
-            item = LIST_ITEM.match(follow)
-            if item:
-                questions.append(item.group(1))
-            elif follow.strip():
-                questions = []
-                break
-    return answer, details, questions
-
-
-def full_reply(result):
-    details = result.get("details")
-    return result.get("response", "") + ("\n\n" + details if details else "")
-
-
-def build_command(provider, mode, cwd, session, model, effort, allowed_tools, prompt, attachments=(), fork=False):
+def build_command(provider, mode, cwd, session, model, effort, allowed_tools, prompt,
+                  attachments=(), fork=False, extra_args=()):
+    extra_args = list(extra_args or ())
     if fork and provider == "agy":
         raise ValueError("agy CLI does not support session forking; use codex or claude")
     if provider == "codex":
+        bypass = _has_flag(extra_args, "--dangerously-bypass-approvals-and-sandbox")
         command = ["codex", "exec"]
         if session:
             command.append("fork" if fork else "resume")
         command.extend(["--json", "--skip-git-repo-check"])
-        if mode == "auto":
-            command.extend([
-                "-c", 'approval_policy="on-request"',
-                "-c", 'approvals_reviewer="auto_review"',
-                "-c", 'sandbox_mode="workspace-write"',
-            ])
-        else:
-            command.extend([
-                "-c", 'approval_policy="never"',
-                "-c", 'sandbox_mode="{}"'.format("read-only" if mode == "consult" else "workspace-write"),
-            ])
+        if not bypass:
+            if mode == "auto":
+                command.extend([
+                    "-c", 'approval_policy="on-request"',
+                    "-c", 'approvals_reviewer="auto_review"',
+                    "-c", 'sandbox_mode="workspace-write"',
+                ])
+            else:
+                command.extend([
+                    "-c", 'approval_policy="never"',
+                    "-c", 'sandbox_mode="{}"'.format("read-only" if mode == "consult" else "workspace-write"),
+                ])
         if model:
             command.extend(["-m", model])
         if effort:
             command.extend(["-c", 'model_reasoning_effort="{}"'.format(effort)])
         # The single-value form keeps a variadic --image from swallowing the "-" below.
         command.extend("--image=" + a for a in attachments if native_attachment(provider, a))
+        command.extend(extra_args)
         command.extend([session, "-"] if session else ["-C", cwd, "-"])
         return command, prompt
     if provider == "claude":
+        bypass = _has_flag(extra_args, "--dangerously-skip-permissions")
         perm_mode = "plan" if mode == "consult" else "auto" if mode == "auto" else "acceptEdits"
         command = ["claude", "-p", "--output-format", "stream-json", "--verbose",
-                   "--permission-prompts", "none", "--permission-mode", perm_mode]
-        if mode == "consult":
+                   "--permission-prompts", "none"]
+        if not bypass and not _has_flag(extra_args, "--permission-mode"):
+            command.extend(["--permission-mode", perm_mode])
+        if mode == "consult" and not _has_flag(extra_args, "--tools"):
             command.extend(["--tools", "Read,Glob,Grep"])
         if model:
             command.extend(["--model", model])
@@ -157,6 +110,7 @@ def build_command(provider, mode, cwd, session, model, effort, allowed_tools, pr
             command.extend(["--resume", session])
             if fork:
                 command.append("--fork-session")
+        command.extend(extra_args)
         # Variadic flags last, one value per argument, so values may contain commas.
         extra_dirs = outside_dirs(attachments, cwd)
         if extra_dirs:
@@ -166,17 +120,29 @@ def build_command(provider, mode, cwd, session, model, effort, allowed_tools, pr
             command.append("--allowedTools")
             command.extend(allowed_tools)
         return command, prompt
+    bypass = _has_flag(extra_args, "--dangerously-skip-permissions")
     agy_mode = "plan" if mode == "consult" else "auto" if mode == "auto" else "accept-edits"
-    command = ["agy", "--input-format", "stream-json", "--output-format", "stream-json",
-               "--mode", agy_mode, "--sandbox"]
+    command = ["agy", "--input-format", "stream-json", "--output-format", "stream-json"]
+    if not _has_flag(extra_args, "--mode"):
+        command.extend(["--mode", agy_mode])
+    if not bypass and not _has_flag(extra_args, "--sandbox"):
+        command.append("--sandbox")
+    # Headless agy defaults to toolPermission=request-review (denying even sandboxed commands).
+    if mode in WORK_MODES and not bypass and not _has_flag(extra_args, "--settings"):
+        command.extend(["--settings", json.dumps({"toolPermission": "proceed-in-sandbox"})])
     if model:
         command.extend(["--model", model])
     if effort:
         command.extend(["--effort", effort])
     if session:
         command.extend(["--conversation", session])
-    for directory in outside_dirs(attachments, cwd):
+    agy_dirs = set(outside_dirs(attachments, cwd))
+    wt_git = worktree_git_dir(cwd)
+    if wt_git:
+        agy_dirs.add(wt_git)
+    for directory in sorted(agy_dirs):
         command.extend(["--add-dir", directory])
+    command.extend(extra_args)
     event = {"event": "user", "message": {"content": prompt}}
     return command, json.dumps(event, ensure_ascii=False) + "\n"
 

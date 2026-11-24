@@ -6,7 +6,11 @@ import os
 from peer_lib.constants import (
     COMPACT_KEYS,
     COMPACT_LIST_LIMIT,
+    DETAILS_LINE,
     DIAGNOSTIC_TAIL,
+    FENCE_LINE,
+    LIST_ITEM,
+    QUESTIONS_LINE,
     RELAY_LIMIT,
     peer_attr,
 )
@@ -18,11 +22,66 @@ from peer_lib.storage import (
 )
 
 __all__ = [
-    "compact_turn", "compact", "relay_text", "one_line", "duration_text",
+    "split_reply", "full_reply", "compact_turn", "compact", "relay_text", "one_line", "duration_text",
     "model_text", "session_text", "render_turn", "render_debate",
     "render_running", "render", "render_details", "render_history",
     "render_sessions", "show", "emit",
 ]
+
+
+def _toggle_fence(fence, line):
+    m = FENCE_LINE.match(line)
+    if not m:
+        return fence, False
+    marker = m.group(1)
+    if fence is None:
+        return (marker[0], len(marker)), True
+    if marker[0] == fence[0] and len(marker) >= fence[1] and not line[m.end():].strip():
+        return None, True
+    return fence, True
+
+
+def split_reply(text, contract):
+    """Split a reply into the answer, details after the marker, and questions for the caller."""
+    text = text or ""
+    if not contract:
+        return text, "", []
+    raw_lines = text.splitlines()
+    fence, split_at = None, None
+    for index, line in enumerate(raw_lines):
+        fence, toggled = _toggle_fence(fence, line)
+        if not toggled and fence is None and DETAILS_LINE.match(line):
+            split_at = index
+            break
+    if split_at is not None:
+        answer = "\n".join(raw_lines[:split_at]).rstrip()
+        details = "\n".join(raw_lines[split_at + 1:]).strip()
+    else:
+        answer, details = text.strip(), ""
+    if not answer:
+        answer, details = details, ""
+    questions, lines, fence, q_index = [], answer.splitlines(), None, None
+    for index, line in enumerate(lines):
+        fence, toggled = _toggle_fence(fence, line)
+        if not toggled and fence is None and QUESTIONS_LINE.match(line):
+            q_index = index
+    if q_index is not None:
+        inline = QUESTIONS_LINE.match(lines[q_index]).group(1).strip()
+        if inline and inline.lower().rstrip(".") not in ("none", "n/a", "no"):
+            questions.append(inline)
+        for follow in lines[q_index + 1:]:
+            item = LIST_ITEM.match(follow)
+            if item:
+                questions.append(item.group(1))
+            elif follow.strip():
+                questions = []
+                break
+    return answer, details, questions
+
+
+def full_reply(result):
+    details = result.get("details")
+    return result.get("response", "") + ("\n\n" + details if details else "")
 
 
 def compact_turn(result):
@@ -149,6 +208,8 @@ def render_turn(result, full, path=None):
     if result.get("worktree"):
         branch = " (branch {})".format(result["worktree_branch"]) if result.get("worktree_branch") else ""
         lines.append("worktree: {}{}".format(result["worktree"], branch))
+    if result.get("extra_args"):
+        lines.append("extra args: " + " ".join(result["extra_args"]))
     if result.get("forked_from"):
         lines.append("forked from: {}".format(result["forked_from"]))
     if result.get("replaced_session_id"):

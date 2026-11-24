@@ -23,7 +23,7 @@ register_peer(globals())
 
 
 def ask(provider, mode, cwd, prompt, config, session=None, model=None, effort=None,
-        timeout=None, attachments=(), progress=None, words=0, debate=False, fork=False):
+        timeout=None, attachments=(), progress=None, words=0, debate=False, fork=False, extra_args=()):
     if int(os.environ.get("PEER_BRIDGE_DEPTH", "0")) >= 1:
         raise ValueError("nested Peer calls are disabled; use the outer caller to coordinate turns")
     if not prompt.strip():
@@ -31,11 +31,13 @@ def ask(provider, mode, cwd, prompt, config, session=None, model=None, effort=No
     prefs = preferences(config, provider, model, effort, timeout)
     if not shutil.which(provider):
         raise ValueError("{} CLI is not installed or not on PATH".format(provider))
+    effective_extra = list(prefs["extra_args"]) + list(extra_args or ())
     prepared_prompt = prompt_for_mode(prompt, mode, cwd, attachments)
     if words:
         prepared_prompt += reply_contract(words, mode, debate)
     command, payload = build_command(provider, mode, cwd, session, prefs["model"], prefs["effort"],
-                                     prefs["allowed_tools"], prepared_prompt, attachments, fork=fork)
+                                     prefs["allowed_tools"], prepared_prompt, attachments,
+                                     fork=fork, extra_args=effective_extra)
     parser = PARSERS[provider]
     before = worktree_snapshot(cwd) if mode in WORK_MODES else None
     effective_session = None if fork else session
@@ -97,6 +99,8 @@ def ask(provider, mode, cwd, prompt, config, session=None, model=None, effort=No
     }
     if fork and session:
         result["forked_from"] = session
+    if effective_extra:
+        result["extra_args"] = effective_extra
     if attachments:
         result["attachments"] = [{"path": a, "native": native_attachment(provider, a)} for a in attachments]
     if stderr.strip():
@@ -140,7 +144,10 @@ def prepare_debate(args, cwd, prompt, config):
         saved = {p: m["settings"] for p, m in matches.items()}
     elif args.new_session:
         check_name(args.new_session)
-    side = {args.a: (args.model_a, args.effort_a), args.b: (args.model_b, args.effort_b)}
+    side = {
+        args.a: (args.model_a, args.effort_a, list(args.extra_arg_a or ())),
+        args.b: (args.model_b, args.effort_b, list(args.extra_arg_b or ())),
+    }
     for provider in (args.a, args.b):
         preferences(config, provider, side[provider][0], side[provider][1], args.timeout)
         if not shutil.which(provider):
@@ -167,16 +174,17 @@ def debate(args, cwd, prompt, config, run, attachments, words, prepared=None):
                 # A fresh side needs the brief; later turns already have it in native history.
                 message = ("Debate brief:\n{}\n\n{}".format(prompt, exchange)
                            if first_turn else exchange)
+            side_extra = side[provider][2] or list(saved[provider].get("extra_args") or ())
             result = ask(provider, "consult", cwd, message, config, session=sessions[provider],
                          model=side[provider][0], effort=side[provider][1], timeout=args.timeout,
                          attachments=attachments if first_turn else (),
                          progress=lambda info, p=provider: run.update(current=dict(info, provider=p)),
-                         words=words, debate=True)
+                         words=words, debate=True, extra_args=side_extra)
             sessions[provider] = result["session_id"]
             transcript.append(result)
             run.update(current=None, **summary)
             if name and result["session_id"]:
-                settings = session_settings(result)
+                settings = session_settings(result, extra_args=side_extra)
                 for key in ("mode", "worktree", "worktree_branch"):
                     if saved[provider].get(key):
                         settings[key] = saved[provider][key]
@@ -188,110 +196,19 @@ def debate(args, cwd, prompt, config, run, attachments, words, prepared=None):
     return dict(summary, status="ok")
 
 
-def read_prompt(explicit):
-    if explicit is not None:
-        return explicit
-    if sys.stdin.isatty():
-        raise ValueError("pass --prompt or pipe a prompt on stdin")
-    return sys.stdin.read()
-
-
-def add_view_arguments(parser):
-    parser.add_argument("--json", action="store_true", help="print JSON instead of text")
-    parser.add_argument("--full", action="store_true",
-                        help="print everything, including details, warnings, and full diagnostics")
-
-
-def add_run_arguments(parser):
-    parser.add_argument("--cwd")
-    parser.add_argument("--timeout", type=float)
-    parser.add_argument("--config")
-    parser.add_argument("--prompt")
-    parser.add_argument("--words", type=int, metavar="N",
-                        help="ask for an answer of at most N words plus optional details (0 turns this off)")
-    parser.add_argument("--attach", action="append", metavar="FILE",
-                        help="file to give the target; images go to Codex natively, others by path")
-    add_view_arguments(parser)
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--output", help="save the result record to this file")
-    group.add_argument("--no-save", action="store_true", help="print the full result without saving a file")
-
-
-def build_parser():
-    parser = JsonArgumentParser(description="Consult or delegate work to a local agent CLI")
-    sub = parser.add_subparsers(dest="command", required=True)
-    ask_parser = sub.add_parser("ask", help="send one turn to a provider, optionally starting a named session")
-    ask_parser.add_argument("--to", choices=PROVIDERS, help="target provider (inferred for --session-name/--fork-from)")
-    ask_parser.add_argument("--mode", choices=MODES)
-    ask_parser.add_argument("--model")
-    ask_parser.add_argument("--effort")
-    ask_parser.add_argument("--new-session", metavar="NAME", help="save the session under NAME")
-    ask_parser.add_argument("--worktree", nargs="?", const=True, metavar="NAME",
-                            help="run in an isolated Git worktree (default name: --new-session or a timestamp)")
-    resume = ask_parser.add_mutually_exclusive_group()
-    resume.add_argument("--session", help="resume this native session ID")
-    resume.add_argument("--session-name", help="resume the session saved under this name")
-    resume.add_argument("--fork-from", metavar="NAME", help="fork the session saved under NAME into a new session")
-    resume.add_argument("--fork-session", metavar="ID", help="fork this native session ID into a new session")
-    add_run_arguments(ask_parser)
-
-    reply_parser = sub.add_parser("reply", help="continue a named session with its saved settings")
-    reply_parser.add_argument("name")
-    reply_parser.add_argument("--to", choices=PROVIDERS, help="pick the provider when the name has several")
-    reply_parser.add_argument("--mode", choices=MODES)
-    reply_parser.add_argument("--model")
-    reply_parser.add_argument("--effort")
-    add_run_arguments(reply_parser)
-
-    debate_parser = sub.add_parser("debate", help="alternate two consult sessions for bounded rounds")
-    debate_parser.add_argument("--a", required=True, choices=PROVIDERS)
-    debate_parser.add_argument("--b", required=True, choices=PROVIDERS)
-    debate_parser.add_argument("--rounds", type=int, default=2)
-    for side in ("a", "b"):
-        debate_parser.add_argument("--session-" + side)
-        debate_parser.add_argument("--model-" + side)
-        debate_parser.add_argument("--effort-" + side)
-    names = debate_parser.add_mutually_exclusive_group()
-    names.add_argument("--session-name", help="resume both sessions saved under this name")
-    names.add_argument("--new-session", metavar="NAME", help="start both sessions and save them under NAME")
-    add_run_arguments(debate_parser)
-
-    for name, text in (("show", "print a saved result, its details, or recent turns"),
-                       ("wait", "wait for a run to finish, then print it")):
-        view = sub.add_parser(name, help=text)
-        view.add_argument("target", nargs="?", help="session name or run file (default: latest run here)")
-        view.add_argument("--to", choices=PROVIDERS, help="pick the provider when the name has several")
-        view.add_argument("--cwd")
-        view.add_argument("--config")
-        add_view_arguments(view)
-        if name == "show":
-            view.add_argument("--details", action="store_true", help="print the details part of the reply")
-            view.add_argument("--last", type=int, metavar="N", help="print the last N runs of the session")
-        else:
-            view.add_argument("--timeout", type=float, default=WAIT_SECONDS,
-                              help="seconds to wait before reporting that it is still running")
-
-    sessions_parser = sub.add_parser("sessions", help="list recorded sessions and their names")
-    sessions_parser.add_argument("--cwd")
-    sessions_parser.add_argument("--all", action="store_true", help="include every directory")
-    sessions_parser.add_argument("--config")
-    sessions_parser.add_argument("--json", action="store_true", help="print JSON instead of text")
-
-    for name, text in (("doctor", "show CLI availability and configured defaults"),
-                       ("models", "show configured models and aliases, and list Antigravity models live")):
-        diagnostic = sub.add_parser(name, help=text + " (always JSON)")
-        diagnostic.add_argument("--config")
-        diagnostic.add_argument("--json", action="store_true", help="accepted for consistency; output is JSON")
-    return parser
-
-
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
-    fmt = "json" if "--json" in argv else "text"
-    full = "--full" in argv
+    peer_argv, passthrough = split_passthrough(argv)
+    fmt = "json" if "--json" in peer_argv else "text"
+    full = "--full" in peer_argv
     run = None
     try:
-        args = build_parser().parse_args(argv)
+        args = build_parser().parse_args(peer_argv)
+        if passthrough:
+            if args.command == "debate":
+                raise ValueError("for debate, use --extra-arg-a / --extra-arg-b instead of --")
+            if args.command not in ("ask", "reply"):
+                raise ValueError("extra CLI arguments after -- are only supported for ask and reply")
         config, config_file = load_config(args.config)
         if args.command == "doctor":
             providers = {}
@@ -303,6 +220,7 @@ def main(argv=None):
                     "efforts": sorted(effort_levels(provider_settings(config, provider), provider)),
                     "timeout_seconds": prefs["timeout"],
                     "work_allowed_tools": prefs["allowed_tools"] if provider == "claude" else None,
+                    "extra_args": prefs["extra_args"],
                 }
             return emit({"status": "ok", "config_path": str(config_file),
                          "output_dir": str(output_dir(config)),
@@ -377,6 +295,8 @@ def main(argv=None):
         mode = args.mode or settings.get("mode") or "consult"
         model = args.model if args.model is not None else settings.get("model")
         effort = args.effort if args.effort is not None else settings.get("effort")
+        cli_extra = list(args.extra_arg or ()) + passthrough
+        extra_args = cli_extra if cli_extra else list(settings.get("extra_args") or ())
         if args.words is not None:
             words = args.words
         elif settings.get("words") is not None:
@@ -408,7 +328,7 @@ def main(argv=None):
                       prompt=prompt, session_name=label)
         result = ask(provider, mode, effective_cwd, prompt, config, session=session, model=model, effort=effort,
                      timeout=args.timeout, attachments=attachments, progress=lambda info: run.update(**info),
-                     words=words, fork=fork)
+                     words=words, fork=fork, extra_args=extra_args)
         if worktree:
             result["worktree"] = worktree
             result["worktree_branch"] = worktree_branch
@@ -417,7 +337,8 @@ def main(argv=None):
         run.record.update(result)
         if label and result["session_id"]:
             result["session_name"] = label
-            previous = bind_name(provider, origin_cwd, label, result["session_id"], session_settings(result))
+            previous = bind_name(provider, origin_cwd, label, result["session_id"],
+                                 session_settings(result, extra_args=extra_args))
             if previous and new_name:
                 result["replaced_session_id"] = previous
         return emit(result, run, fmt, full)
