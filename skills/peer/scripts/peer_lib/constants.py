@@ -23,6 +23,13 @@ VALUE_FLAGS = {
     "--rounds", "--session-a", "--session-b", "--model-a", "--model-b", "--effort-a",
     "--effort-b", "--last",
 }
+AGY_CONSULT_ALLOW = (
+    "command(ls)", "command(pwd)", "command(cat)", "command(head)", "command(tail)",
+    "command(wc)", "command(rg)", "command(grep)", "command(tree)", "command(stat)",
+    "command(file)", "command(which)",
+    "command(git status)", "command(git diff)", "command(git log)", "command(git show)",
+    "command(git rev-parse)", "command(git ls-files)", "command(git blame)",
+)
 DENIAL = re.compile(
     r"soft[- ]denied|permission denied|operation not permitted|read[- ]only (?:database|file system)|permission[^\n]*(?:denied|not granted|required)|"
     r"approval[^\n]*(?:denied|required|unavailable|cannot)|"
@@ -63,7 +70,7 @@ EXIT_RUNNING = 3
 
 __all__ = [
     "PROVIDERS", "MODES", "WORK_MODES", "EFFORTS", "CONFIG_KEYS", "PROVIDER_KEYS",
-    "VALUE_FLAGS", "DENIAL", "NONFATAL_STDERR", "FENCE_LINE", "NAME_PATTERN", "IMAGE_SUFFIXES",
+    "VALUE_FLAGS", "AGY_CONSULT_ALLOW", "DENIAL", "NONFATAL_STDERR", "FENCE_LINE", "NAME_PATTERN", "IMAGE_SUFFIXES",
     "SKIP_DIRS", "DEFAULT_TIMEOUT", "DEFAULT_REPLY_WORDS", "WAIT_SECONDS",
     "WAIT_POLL_SECONDS", "STALE_SECONDS", "DIAGNOSTIC_TAIL", "DETAILS_LINE",
     "QUESTIONS_LINE", "LIST_ITEM", "STOP_GRACE_SECONDS", "HEARTBEAT_SECONDS",

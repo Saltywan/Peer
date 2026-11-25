@@ -995,7 +995,12 @@ class PeerTests(unittest.TestCase):
         self.assertEqual(code, 0)
         args = self.logged()["args"]
         self.assertIn("--sandbox", args)
-        self.assertNotIn("--settings", args)
+        self.assertIn("--settings", args)
+        consult_settings = json.loads(args[args.index("--settings") + 1])
+        self.assertNotIn("toolPermission", consult_settings)
+        self.assertIn("command(ls)", consult_settings["permissions"]["allow"])
+        self.assertIn("command(git status)", consult_settings["permissions"]["allow"])
+        self.assertIn("Prefer built-in file read/search tools", self.logged()["stdin"])
         for mode in ("work", "auto"):
             code, _ = self.call("ask", "--to", "agy", "--mode", mode, "--cwd", str(self.cwd), "--prompt", "Edit")
             self.assertEqual(code, 0)

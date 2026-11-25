@@ -8,6 +8,7 @@ import threading
 import time
 
 from peer_lib.constants import (
+    AGY_CONSULT_ALLOW,
     DENIAL,
     HEARTBEAT_SECONDS,
     NONFATAL_STDERR,
@@ -30,7 +31,7 @@ __all__ = [
 def prompt_for_mode(prompt, mode, cwd, attachments=()):
     if mode == "consult":
         lead = ("Peer consultation in {}: analyze and answer. Do not edit files or run "
-                "mutating commands.").format(cwd)
+                "mutating commands. Prefer built-in file read/search tools over shell commands.").format(cwd)
     else:
         lead = ("Peer delegated work in {}: you may edit files only in this workspace. "
                 "Use absolute paths under this directory with file-edit tools; shell commands "
@@ -128,8 +129,10 @@ def build_command(provider, mode, cwd, session, model, effort, allowed_tools, pr
     if not bypass and not _has_flag(extra_args, "--sandbox"):
         command.append("--sandbox")
     # Headless agy defaults to toolPermission=request-review (denying even sandboxed commands).
-    if mode in WORK_MODES and not bypass and not _has_flag(extra_args, "--settings"):
-        command.extend(["--settings", json.dumps({"toolPermission": "proceed-in-sandbox"})])
+    if not bypass and not _has_flag(extra_args, "--settings"):
+        agy_settings = ({"toolPermission": "proceed-in-sandbox"} if mode in WORK_MODES
+                        else {"permissions": {"allow": list(AGY_CONSULT_ALLOW)}})
+        command.extend(["--settings", json.dumps(agy_settings)])
     if model:
         command.extend(["--model", model])
     if effort:

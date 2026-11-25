@@ -71,7 +71,7 @@ Calls take minutes, sometimes half an hour at high effort.
 
 ## Rules
 
-- **Work targets run in their own sandbox.** Codex `workspace-write` and Antigravity's terminal sandbox may be unable to launch browsers, simulators, or other local apps. In `work`/`auto` modes, Peer passes session-only `toolPermission: "proceed-in-sandbox"` to `agy` (and adds the `.git` common dir in worktrees) so sandboxed commands run without prompts. If the task needs extra CLI flags (such as `--dangerously-skip-permissions` for `agy`/`claude` or `--add-dir`), pass them via `--extra-arg=--flag`, after `--` on `ask`/`reply`, or configure `providers.PROVIDER.extra_args` in `~/.config/peer/config.json` (when authorized by the user).
+- **Work targets run in their own sandbox.** Codex `workspace-write` and Antigravity's terminal sandbox may be unable to launch browsers, simulators, or other local apps. Peer automatically passes session-only read-only command allow rules to `agy` in `consult` mode, `toolPermission: "proceed-in-sandbox"` in `work`/`auto` modes, and the `.git` common dir in worktrees. If the task needs extra CLI flags (such as `--dangerously-skip-permissions` for `agy`/`claude` or `--add-dir`), pass them via `--extra-arg=--flag`, after `--` on `ask`/`reply`, or configure `providers.PROVIDER.extra_args` in `~/.config/peer/config.json` (when authorized by the user).
 - If the host blocks the Peer command, use its normal scoped approval flow. A called agent cannot exceed this host's sandbox.
 - One writer per checkout: do not run two `work` calls, or a `work` call and your own edits, in the same checkout at once. Use separate worktrees for parallel work.
 - Do not call Peer from an agent that Peer launched; the wrapper rejects nested calls.
